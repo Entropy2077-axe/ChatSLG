@@ -20,27 +20,37 @@ export function WarehousePage() {
   const settings = useSettingsStore()
   const shopEnabled = useModuleEnabled('shop')
   const [gifting, setGifting] = useState<InventoryItem | null>(null)
+  const [giftBusy, setGiftBusy] = useState(false)
 
   async function handleGift(contactId: string) {
-    if (!gifting) return
+    if (!gifting || giftBusy) return
     const contact = contacts.find((c) => c.id === contactId)
-    const conv = await db.conversations.where('contactId').equals(contactId).first()
-    if (conv) {
-      await db.messages.add({
-        id: uuid(),
-        conversationId: conv.id,
-        role: 'user',
-        type: 'gift',
-        content: gifting.name,
-        gift: { name: gifting.name, icon: gifting.icon, description: gifting.description },
-        createdAt: Date.now(),
+    if (!contact) return
+    setGiftBusy(true)
+    try {
+      const now = Date.now()
+      const existing = await db.conversations.where('contactId').equals(contactId).first()
+      const conv = existing ?? { id: uuid(), contactId, channel: 'private_phone' as const, pinned: false, createdAt: now, updatedAt: now }
+      await db.transaction('rw', [db.conversations, db.messages, db.inventory], async () => {
+        if (!existing) await db.conversations.add(conv)
+        await db.messages.add({
+          id: uuid(),
+          conversationId: conv.id,
+          role: 'user',
+          type: 'gift',
+          content: gifting.name,
+          gift: { name: gifting.name, icon: gifting.icon, description: gifting.description },
+          createdAt: now,
+        })
+        await db.conversations.update(conv.id, { updatedAt: now })
+        await db.inventory.delete(gifting.id)
       })
-      await db.conversations.update(conv.id, { updatedAt: Date.now() })
-      if (contact) triggerAiTurn(conv.id, contact, settings, stickers)
+      triggerAiTurn(conv.id, contact, settings, stickers)
+      setGifting(null)
+      navigate(`/chat/${conv.id}`)
+    } finally {
+      setGiftBusy(false)
     }
-    await db.inventory.delete(gifting.id)
-    setGifting(null)
-    navigate(conv ? `/chat/${conv.id}` : '/contacts')
   }
 
   return (
@@ -92,7 +102,8 @@ export function WarehousePage() {
                   <button
                     key={c.id}
                     onClick={() => handleGift(c.id)}
-                    className="flex w-full items-center gap-3 rounded-lg px-2 py-2 text-left active:bg-gray-50"
+                    disabled={giftBusy}
+                    className="flex w-full items-center gap-3 rounded-lg px-2 py-2 text-left active:bg-gray-50 disabled:opacity-40"
                   >
                     <Avatar avatar={c.avatar} color={c.avatarColor} size={36} />
                     <span className="text-sm text-gray-900">{displayName(c)}</span>

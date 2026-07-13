@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useLocation, useNavigate, useSearchParams } from 'react-router-dom'
 import { useLiveQuery } from 'dexie-react-hooks'
 import { v4 as uuid } from 'uuid'
 import { db } from '../db/db'
@@ -7,30 +7,25 @@ import { TopBar } from '../components/TopBar'
 import { Avatar } from '../components/Avatar'
 import { AvatarPicker } from '../components/AvatarPicker'
 import { useSettingsStore } from '../store/useSettingsStore'
-import { useContactCreationStore, type GenerateValues, type RelationRow } from '../store/useContactCreationStore'
+import { useContactCreationStore, type ContactCreationInput, type GenerateValues, type RelationRow } from '../store/useContactCreationStore'
 import { useModuleEnabled } from '../features'
-import { chatCompletion } from '../lib/deepseek'
 import { randomAvatarColor } from '../lib/colors'
 import { AVATAR_EMOJIS } from '../lib/avatarEmojis'
 import { pickRandomTrait } from '../lib/randomTraits'
 import { setPairedContactRelation } from '../lib/contactRelations'
 import { rememberInitialContactRelation } from '../lib/memory'
 import { displayName } from '../lib/contact'
-import { pickAvatarCategory } from '../lib/avatarCategory'
 import { OCCUPATION_OPTIONS, employmentPatch } from '../lib/career'
-import { randomAnimeAvatar, searchPexelsPhoto } from '../lib/photoSearch'
-import { retrieveWorldbookContext } from '../lib/worldbook'
 import { customTraitsValidationError, hasOverlappingCustomTraitRules } from '../lib/contactCreator'
-import { ensureWorldInitialized, formatLocationTree } from '../lib/world'
+import { ensureWorldInitialized } from '../lib/world'
 import { OUTFIT_FIELDS } from '../lib/outfit'
+import { enqueueContactCreation } from '../lib/contactCreationQueue'
 import { CONTACT_RELATION_LABELS, HOBBY_TAG_OPTIONS, PERSONALITY_TRAIT_OPTIONS, type ContactRelationLabel, type CustomPersonalityTrait } from '../types'
 import {
   AGE_RANGE_OPTIONS,
   GENDER_OPTIONS,
   PERSONALITY_TAG_OPTIONS,
   RELATIONSHIP_OPTIONS,
-  buildPersonaGenerationPrompt,
-  parsePersonaGeneration,
 } from '../lib/prompt'
 
 /** Contact creation has a few real async phases (persona LLM call, then optional photo fetch, then db writes) — reflect actual state transitions rather than a fake time-based animation. */
@@ -47,6 +42,8 @@ const PROGRESS_PERCENT: Record<'persona' | 'avatar' | 'saving', number> = {
 
 export function ContactAddPage() {
   const navigate = useNavigate()
+  const location = useLocation()
+  const [searchParams] = useSearchParams()
   const settings = useSettingsStore()
   const existingContacts = useLiveQuery(() => db.contacts.toArray(), []) ?? []
   const savedPersonas = useLiveQuery(() => db.savedPersonas.orderBy('updatedAt').reverse().toArray(), []) ?? []
@@ -69,7 +66,21 @@ export function ContactAddPage() {
   const [avatar, setAvatar] = useState(AVATAR_EMOJIS[Math.floor(Math.random() * AVATAR_EMOJIS.length)])
   const [avatarManuallySet, setAvatarManuallySet] = useState(false)
   const [pickingAvatar, setPickingAvatar] = useState(false)
-  const { generating, progressStep, error, creationDraft, setGenerating, setProgressStep, setError, setCreationDraft } = useContactCreationStore()
+  const jobs = useContactCreationStore((state) => state.jobs)
+  const updateJob = useContactCreationStore((state) => state.updateJob)
+  const updateDraft = useContactCreationStore((state) => state.updateDraft)
+  const removeJob = useContactCreationStore((state) => state.removeJob)
+  const selectedJob = jobs.find((job) => job.id === searchParams.get('job'))
+  const creationDraft = selectedJob?.draft ?? null
+  const generating = selectedJob?.status === 'saving'
+  const progressStep = selectedJob?.status === 'persona' || selectedJob?.status === 'avatar' || selectedJob?.status === 'saving' ? selectedJob.status : null
+  const [formError, setFormError] = useState('')
+  const error = selectedJob?.error || formError
+  const setCreationDraft = (updater: ((draft: NonNullable<typeof creationDraft>) => NonNullable<typeof creationDraft>) | null) => {
+    if (!selectedJob) return
+    if (updater === null) removeJob(selectedJob.id)
+    else updateDraft(selectedJob.id, updater)
+  }
   const [relationRows, setRelationRows] = useState<RelationRow[]>([])
   const [customTraits, setCustomTraits] = useState<CustomPersonalityTrait[]>([])
   const [customTendencies, setCustomTendencies] = useState('')
@@ -82,6 +93,11 @@ export function ContactAddPage() {
   const [customBirthday, setCustomBirthday] = useState('')
   const [personaPickerOpen, setPersonaPickerOpen] = useState(false)
   const [personaPage, setPersonaPage] = useState(0)
+
+  function returnToContacts() {
+    if ((location.state as { returnToContacts?: boolean } | null)?.returnToContacts) navigate(-1)
+    else navigate('/contacts', { replace: true })
+  }
 
   function fallbackBirthday(ageText: string) {
     const ages = [...ageText.matchAll(/\d+/g)].map((m) => Number(m[0])).filter(Number.isFinite)
@@ -111,7 +127,7 @@ export function ContactAddPage() {
 
   function applySavedPersona(saved: import('../types').SavedPersona) {
     const profile = saved.profile
-    setCustomTendencies(profile.personalityTendencies.join('、')); setCustomAge(profile.age); setCustomGender(profile.gender); setCustomRelationship(profile.relationship); setCustomOccupation(profile.occupation); setCustomHobbies(profile.hobbies.join('、')); setExtra(saved.personaConstraints || profile.notes || ''); setCustomTraits(saved.customPersonalityTraits || []); setCustomRealName(saved.realName || ''); setCustomNickname(saved.nickname || ''); setCustomBirthday(saved.birthday || ''); setPersonaPickerOpen(false)
+    setCustomTendencies(profile.personalityTendencies.join('、')); setCustomAge(profile.age); setCustomGender(profile.gender); setCustomRelationship(profile.relationship); setCustomOccupation(profile.occupation); setCustomHobbies(profile.hobbies.join('、')); setExtra(saved.personaConstraints || profile.notes || ''); setCustomTraits((saved.customPersonalityTraits || []).map((trait) => ({ ...trait, id: uuid(), rules: trait.rules.map((rule) => ({ ...rule, id: uuid() })) }))); setCustomRealName(saved.realName || ''); setCustomNickname(saved.nickname || ''); setCustomBirthday(saved.birthday || ''); setPersonaPickerOpen(false)
   }
 
   function addRelationRow() {
@@ -149,101 +165,41 @@ export function ContactAddPage() {
 
   async function handleGenerate(overrides?: GenerateValues) {
     if (!settings.apiKey) {
-      setError('还没有配置 API Key，请先去手机桌面的“设置”App 填写')
+      setFormError('还没有配置 API Key，请先去手机桌面的“设置”App 填写')
       return
     }
     if (nuwaEnabled) {
       const traitError = customTraitsValidationError(customTraits)
-      if (traitError) { setError(traitError); return }
-      if (relationRows.some((row) => !row.targetContactId || !row.label.trim())) { setError('联系人关系不能留空'); return }
+      if (traitError) { setFormError(traitError); return }
+      if (relationRows.some((row) => !row.targetContactId || !row.label.trim())) { setFormError('联系人关系不能留空'); return }
     }
-    setGenerating(true)
-    setError('')
-    setProgressStep('persona')
+    setFormError('')
     try {
-      if (await db.contacts.count() >= 12) throw new Error('每个世界最多创建12个角色')
       const values = overrides ?? { tags: nuwaEnabled ? customTendencies.split(/[、,，]+/).map((x) => x.trim()).filter(Boolean) : tags, ageRange: nuwaEnabled ? customAge : ageRange, gender: nuwaEnabled ? customGender : gender, relationship: nuwaEnabled ? customRelationship : relationship, personalityTrait, hobbies: nuwaEnabled ? customHobbies.split(/[、,，]+/).map((x) => x.trim()).filter(Boolean) : hobbies, occupation: nuwaEnabled ? customOccupation.trim() : (occupation === '自定义' ? customOccupation.trim() : occupation), relationRows }
-      const avatarCategory = pickAvatarCategory(values.tags)
-      const world = await ensureWorldInitialized()
-      const locations = await db.locations.where('worldId').equals(world.worldId).sortBy('sortOrder')
-      const locationTreeText = formatLocationTree(locations)
-      const worldbookText = await retrieveWorldbookContext([values.tags.join(' '), values.ageRange, values.gender, values.relationship, values.personalityTrait, values.hobbies.join(' '), values.occupation, extra].join('\n'), { maxEntries: 8, maxChars: 6500 })
-      const raw = await chatCompletion({
-        apiKey: settings.apiKey,
-        baseUrl: settings.baseUrl,
-        model: settings.model,
-        messages: [
-          {
-            role: 'system',
-            content: buildPersonaGenerationPrompt(
-              {
-                personalityTags: values.tags,
-                ageRange: values.ageRange,
-                gender: values.gender,
-                relationship: values.relationship,
-                personalityTrait: values.personalityTrait,
-                hobbies: values.hobbies,
-                extra: [extra, nuwaEnabled ? `身份资料（留空项请自然补全）：真名=${customRealName || '未填写'}；网名=${customNickname || '未填写'}；出生日期=${customBirthday || '未填写'}。` : '', worldbookText ? `【创建时必须遵守的世界书】\n${worldbookText}` : ''].filter(Boolean).join('\n\n'),
-                occupation: values.occupation,
-              },
-              avatarCategory,
-              locationTreeText,
-            ),
-          },
-          { role: 'user', content: '请生成' },
-        ],
-        jsonMode: true,
-        purpose: 'persona',
-      })
-      const parsed = parsePersonaGeneration(raw)
-      if (!parsed) throw new Error('生成结果解析失败 请重试一次')
-      const parentIds = new Set(locations.map((item) => item.parentId).filter(Boolean))
-      const locationIds = new Set(locations.filter((item) => !parentIds.has(item.id)).map((item) => item.id))
-      if (parsed.worldSchedule.length === 0) throw new Error('角色日程为空，请重新生成')
-      if (parsed.worldSchedule.some((item) => !locationIds.has(item.locationId))) throw new Error('角色日程引用了不存在的地点，请重新生成')
-
-      // Auto-fetch a real photo avatar matching the code-chosen category —
-      // only if the user hasn't already manually picked their own emoji/upload.
-      // Best-effort: any failure (no Pexels key, network error, no results)
-      // just falls back to the random emoji already sitting in `avatar`.
-      let finalAvatar = avatar
-      let avatarPhotographer: string | undefined
-      let avatarPhotographerUrl: string | undefined
-      if (!avatarManuallySet) {
-        setProgressStep('avatar')
-        try {
-          const photo =
-            avatarCategory === 'anime'
-              ? await randomAnimeAvatar()
-              : await searchPexelsPhoto(settings.pexelsApiKey, parsed.avatarKeyword || avatarCategory, 'square')
-          if (photo) {
-            finalAvatar = photo.url
-            avatarPhotographer = photo.photographer
-            avatarPhotographerUrl = photo.photographerUrl
-          }
-        } catch {
-          // photo avatar is a nice-to-have; contact creation must still succeed
-        }
+      const input: ContactCreationInput = {
+        mode: nuwaEnabled ? 'nuwa' : 'standard',
+        values,
+        extra: extra.trim(),
+        avatar,
+        avatarManuallySet,
+        realName: customRealName.trim(),
+        nickname: customNickname.trim(),
+        birthday: customBirthday.trim(),
+        customTraits: structuredClone(customTraits),
       }
-
-      setCreationDraft({ parsed, values, finalAvatar, avatarPhotographer, avatarPhotographerUrl, worldVersion: world.worldVersion, worldSlot: world.slot, playerLocationId: world.playerLocationId })
-      setProgressStep(null)
-      return
+      await enqueueContactCreation(input)
+      returnToContacts()
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err))
-    } finally {
-      setGenerating(false)
-      setProgressStep(null)
+      setFormError(err instanceof Error ? err.message : String(err))
     }
   }
 
   async function confirmCreation() {
-    if (!creationDraft || generating) return
-    setGenerating(true)
-    setProgressStep('saving')
-    setError('')
+    if (!creationDraft || !selectedJob || generating) return
+    updateJob(selectedJob.id, { status: 'saving', error: '' })
     try {
       const { parsed, values, finalAvatar, avatarPhotographer, avatarPhotographerUrl } = creationDraft
+      const input = selectedJob.input
       const currentWorld = await ensureWorldInitialized()
       if (currentWorld.worldVersion !== creationDraft.worldVersion) throw new Error('地点树已变化，请重新生成人设和日程后再创建')
       if (await db.contacts.count() >= 12) throw new Error('每个世界最多创建12个角色')
@@ -254,18 +210,18 @@ export function ContactAddPage() {
         await db.contacts.add({
         id,
         name: parsed.name,
-        realName: (nuwaEnabled ? customRealName.trim() : '') || parsed.realName || parsed.name,
-        nickname: (nuwaEnabled ? customNickname.trim() : '') || (nuwaEnabled ? parsed.nickname : parsed.name) || parsed.name,
+        realName: (input.mode === 'nuwa' ? input.realName : '') || parsed.realName || parsed.name,
+        nickname: (input.mode === 'nuwa' ? input.nickname : '') || (input.mode === 'nuwa' ? parsed.nickname : parsed.name) || parsed.name,
         gender: values.gender || parsed.personaProfile?.facts.find((fact) => fact.includes('性别')) || '',
-        birthday: (nuwaEnabled ? customBirthday.trim() : '') || parsed.birthday || fallbackBirthday(values.ageRange),
+        birthday: (input.mode === 'nuwa' ? input.birthday : '') || parsed.birthday || fallbackBirthday(values.ageRange),
         avatar: finalAvatar,
         avatarColor: randomAvatarColor(),
         avatarPhotographer,
         avatarPhotographerUrl,
         systemPrompt: parsed.persona,
-        personaConstraints: extra.trim() || undefined,
-        creatorProfile: { personalityTendencies: values.tags, age: values.ageRange, gender: values.gender, relationship: values.relationship, occupation: values.occupation, hobbies: values.hobbies, notes: extra.trim() },
-        customPersonalityTraits: nuwaEnabled ? customTraits : undefined,
+        personaConstraints: input.extra || undefined,
+        creatorProfile: { personalityTendencies: values.tags, age: values.ageRange, gender: values.gender, relationship: values.relationship, occupation: values.occupation, hobbies: values.hobbies, notes: input.extra },
+        customPersonalityTraits: input.mode === 'nuwa' ? input.customTraits : undefined,
         personaProfile: parsed.personaProfile,
         speechSamples: parsed.speechSamples,
         outfit: { ...parsed.outfit, updatedAt: now, sourceEventIds: [] },
@@ -276,7 +232,7 @@ export function ContactAddPage() {
         memoryMessageCursor: 0,
         relationshipBase: values.relationship || '朋友',
         relationshipDynamic: '',
-        personalityTrait: nuwaEnabled ? '无' : (values.personalityTrait || '无'),
+        personalityTrait: input.mode === 'nuwa' ? '无' : (values.personalityTrait || '无'),
         schedule: parsed.schedule,
         scheduleOverrides: [],
         mbti: parsed.mbti || undefined,
@@ -299,13 +255,11 @@ export function ContactAddPage() {
           now,
         })
       }
-      setCreationDraft(null)
-      navigate('/contacts')
+      updateJob(selectedJob.id, { status: 'completed' })
+      removeJob(selectedJob.id)
+      returnToContacts()
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err))
-    } finally {
-      setGenerating(false)
-      setProgressStep(null)
+      updateJob(selectedJob.id, { status: 'ready', error: err instanceof Error ? err.message : String(err) })
     }
   }
 
@@ -412,9 +366,9 @@ export function ContactAddPage() {
 
         <label className="mb-2 block text-xs font-medium text-gray-400">年龄段</label>
         <div className="mb-4 flex flex-wrap gap-2">
-          {AGE_RANGE_OPTIONS.map((v) => (
+          {AGE_RANGE_OPTIONS.map((v, index) => (
             <button
-              key={v}
+              key={`age-${v}-${index}`}
               onClick={() => setAgeRange(ageRange === v ? '' : v)}
               className={`rounded-full px-3 py-1.5 text-xs ${
                 ageRange === v ? 'bg-gray-900 text-white' : 'bg-gray-100 text-gray-600'
@@ -427,9 +381,9 @@ export function ContactAddPage() {
 
         <label className="mb-2 block text-xs font-medium text-gray-400">性别</label>
         <div className="mb-4 flex flex-wrap gap-2">
-          {GENDER_OPTIONS.map((v) => (
+          {GENDER_OPTIONS.map((v, index) => (
             <button
-              key={v}
+              key={`gender-${v}-${index}`}
               onClick={() => setGender(v === '不限' ? '' : v)}
               className={`rounded-full px-3 py-1.5 text-xs ${
                 gender === v || (v === '不限' && !gender) ? 'bg-gray-900 text-white' : 'bg-gray-100 text-gray-600'
@@ -442,9 +396,9 @@ export function ContactAddPage() {
 
         <label className="mb-2 block text-xs font-medium text-gray-400">关系定位</label>
         <div className="mb-4 flex flex-wrap gap-2">
-          {RELATIONSHIP_OPTIONS.map((v) => (
+          {RELATIONSHIP_OPTIONS.map((v, index) => (
             <button
-              key={v}
+              key={`relationship-${v}-${index}`}
               onClick={() => setRelationship(relationship === v ? '' : v)}
               className={`rounded-full px-3 py-1.5 text-xs ${
                 relationship === v ? 'bg-gray-900 text-white' : 'bg-gray-100 text-gray-600'
@@ -470,9 +424,9 @@ export function ContactAddPage() {
               >
                 🎲 随机
               </button>
-              {PERSONALITY_TRAIT_OPTIONS.map((opt) => (
+              {PERSONALITY_TRAIT_OPTIONS.map((opt, index) => (
                 <button
-                  key={opt.value}
+                  key={`trait-${opt.value}-${index}`}
                   type="button"
                   onClick={() => setPersonalityTrait(personalityTrait === opt.value ? '' : opt.value)}
                   className={`rounded-full px-3 py-1.5 text-xs ${
@@ -487,15 +441,15 @@ export function ContactAddPage() {
           </>
         )}
 
-        {careerEnabled && <div className="mb-4"><label className="mb-2 block text-xs font-medium text-gray-400">职业（必选）</label><div className="flex flex-wrap gap-2"><button type="button" onClick={()=>setOccupation(OCCUPATION_OPTIONS[Math.floor(Math.random()*OCCUPATION_OPTIONS.length)])} className="rounded-full bg-gray-100 px-3 py-1.5 text-xs text-gray-600">🎲 随机</button>{[...OCCUPATION_OPTIONS,'自定义'].map(v=><button key={v} type="button" onClick={()=>setOccupation(v)} className={`rounded-full px-3 py-1.5 text-xs ${occupation===v?'bg-gray-900 text-white':'bg-gray-100 text-gray-600'}`}>{v}</button>)}</div>{occupation==='自定义'&&<input value={customOccupation} onChange={e=>setCustomOccupation(e.target.value)} placeholder="输入职业" className="mt-2 w-full rounded-lg border border-gray-200 px-3 py-2 text-sm"/>}</div>}
+        {careerEnabled && <div className="mb-4"><label className="mb-2 block text-xs font-medium text-gray-400">职业（必选）</label><div className="flex flex-wrap gap-2"><button type="button" onClick={()=>setOccupation(OCCUPATION_OPTIONS[Math.floor(Math.random()*OCCUPATION_OPTIONS.length)])} className="rounded-full bg-gray-100 px-3 py-1.5 text-xs text-gray-600">🎲 随机</button>{[...OCCUPATION_OPTIONS,'自定义'].map((v, index)=><button key={`occupation-${v}-${index}`} type="button" onClick={()=>setOccupation(v)} className={`rounded-full px-3 py-1.5 text-xs ${occupation===v?'bg-gray-900 text-white':'bg-gray-100 text-gray-600'}`}>{v}</button>)}</div>{occupation==='自定义'&&<input value={customOccupation} onChange={e=>setCustomOccupation(e.target.value)} placeholder="输入职业" className="mt-2 w-full rounded-lg border border-gray-200 px-3 py-2 text-sm"/>}</div>}
 
         {/* 兴趣爱好（可选） */}
         <div className="mb-4">
           <label className="mb-2 block text-xs font-medium text-gray-400">兴趣爱好（可选）</label>
           <div className="flex flex-wrap gap-2">
-            {HOBBY_TAG_OPTIONS.map((hobby) => (
+            {HOBBY_TAG_OPTIONS.map((hobby, index) => (
               <button
-                key={hobby}
+                key={`hobby-${hobby}-${index}`}
                 type="button"
                 onClick={() =>
                   setHobbies(

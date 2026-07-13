@@ -257,6 +257,15 @@ export class ChatSLGDB extends Dexie {
         }
       }
     })
+    this.version(27).stores({
+      messages: 'id, conversationId, createdAt, debugAiTurnId, [conversationId+createdAt], [conversationId+role+createdAt]',
+      aiTurns: 'id, conversationId, createdAt, [conversationId+createdAt]',
+      perceivedEvents: 'id, eventId, characterId, observedAtStep, [characterId+observedAtStep]',
+      contactMemories: 'id, contactId, scope, groupId, kind, category, createdAt, updatedAt, [contactId+updatedAt], *relatedContactIds',
+      lifeEvents: 'id, contactId, occurredAt, visibility, importance, [contactId+occurredAt], *participantContactIds',
+      groupPlans: 'id, groupId, status, scheduledAt, createdAt, [groupId+createdAt]',
+      momentComments: 'id, momentId, authorContactId, createdAt, [momentId+createdAt]',
+    })
   }
 }
 

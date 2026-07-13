@@ -16,6 +16,7 @@ export function ShopPage() {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
   const [toast, setToast] = useState('')
+  const [buying, setBuying] = useState(false)
   const [hasBrowsed, setHasBrowsed] = useState(false)
   const wallet = useLiveQuery(() => db.walletAccounts.get(USER_WALLET_ID), [])
 
@@ -55,20 +56,31 @@ export function ShopPage() {
   }
 
   async function handleBuy(product: GeneratedProduct) {
+    if (buying) return
     if ((wallet?.balance ?? 0) < product.price) {
       setToast('金币不够啦')
       return
     }
-    await transferFunds({ from: USER_WALLET_ID, amount: product.price, kind: 'purchase', note: product.name })
-    await db.inventory.add({
-      id: uuid(),
-      name: product.name,
-      description: product.description,
-      icon: product.icon,
-      price: product.price,
-      acquiredAt: Date.now(),
-    })
-    setToast(`已购买「${product.name}」`)
+    setBuying(true)
+    const itemId = uuid()
+    try {
+      await db.transaction('rw', [db.walletAccounts, db.walletTransactions, db.inventory], async () => {
+        await transferFunds({ from: USER_WALLET_ID, amount: product.price, kind: 'purchase', note: product.name, idempotencyKey: `purchase:${itemId}` })
+        await db.inventory.add({
+          id: itemId,
+          name: product.name,
+          description: product.description,
+          icon: product.icon,
+          price: product.price,
+          acquiredAt: Date.now(),
+        })
+      })
+      setToast(`已购买「${product.name}」`)
+    } catch (err) {
+      setToast(err instanceof Error ? err.message : '购买失败，请重试')
+    } finally {
+      setBuying(false)
+    }
   }
 
   return (
@@ -85,7 +97,7 @@ export function ShopPage() {
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           onKeyDown={(e) => {
-            if (e.key === 'Enter') {
+            if (e.key === 'Enter' && !e.nativeEvent.isComposing) {
               e.preventDefault()
               generate(query.trim() || null)
             }
@@ -127,7 +139,8 @@ export function ShopPage() {
                   <span className="text-xs font-medium text-[#aa3bff]">{formatCurrency(p.price, settings)}</span>
                   <button
                     onClick={() => handleBuy(p)}
-                    className="rounded-lg bg-gray-900 px-2.5 py-1 text-xs text-white"
+                    disabled={buying}
+                    className="rounded-lg bg-gray-900 px-2.5 py-1 text-xs text-white disabled:opacity-40"
                   >
                     购买
                   </button>

@@ -11,10 +11,10 @@ import { useLongPress } from '../hooks/useLongPress'
 import { formatListTime } from '../lib/time'
 import { displayName } from '../lib/contact'
 import { previewForMessage } from '../lib/messagePreview'
-import { unreadCountFor } from '../lib/unread'
-import type { Message } from '../types'
+import { conversationMessageStats, type ConversationMessageStats } from '../lib/conversationStats'
 
 const EMPTY_ARRAY: never[] = []
+const EMPTY_STATS = new Map<string, ConversationMessageStats>()
 
 export function MessagesPage() {
   const [searching, setSearching] = useState(false)
@@ -27,24 +27,14 @@ export function MessagesPage() {
     .toArray(), []) ?? EMPTY_ARRAY
   const contacts = useLiveQuery(() => db.contacts.toArray(), []) ?? EMPTY_ARRAY
   const groups = useLiveQuery(() => db.groups.toArray(), []) ?? EMPTY_ARRAY
-  const messages = useLiveQuery(() => db.messages.toArray(), []) ?? EMPTY_ARRAY
+  const messageStats = useLiveQuery(() => conversationMessageStats(conversations), [conversations]) ?? EMPTY_STATS
 
   const rows = useMemo(() => {
     const contactById = new Map(contacts.map((c) => [c.id, c]))
     const groupById = new Map(groups.map((g) => [g.id, g]))
-    const lastMsgByConv = new Map<string, Message>()
-    const messagesByConv = new Map<string, Message[]>()
-    for (const m of messages) {
-      const prev = lastMsgByConv.get(m.conversationId)
-      if (!prev || m.createdAt > prev.createdAt) lastMsgByConv.set(m.conversationId, m)
-      const arr = messagesByConv.get(m.conversationId) ?? []
-      arr.push(m)
-      messagesByConv.set(m.conversationId, arr)
-    }
     return conversations
       .map((conv) => {
-        const lastMessage = lastMsgByConv.get(conv.id)
-        const unread = unreadCountFor(conv.lastReadAt, messagesByConv.get(conv.id) ?? [])
+        const { lastMessage, unread } = messageStats.get(conv.id) ?? { lastMessage: undefined, unread: 0 }
         if (conv.groupId) {
           const group = groupById.get(conv.groupId)
           if (!group) return null
@@ -77,7 +67,7 @@ export function MessagesPage() {
         if (a.conv.pinned !== b.conv.pinned) return a.conv.pinned ? -1 : 1
         return b.conv.updatedAt - a.conv.updatedAt
       })
-  }, [conversations, contacts, groups, messages])
+  }, [conversations, contacts, groups, messageStats])
 
   const menuConv = rows.find((r) => r.conv.id === menuFor)?.conv
 
@@ -161,10 +151,11 @@ function ConversationRow(props: {
 }) {
   const longPress = useLongPress(props.onLongPress)
   return (
-    <div
+    <button
+      type="button"
       {...longPress}
       onClick={props.onClick}
-      className={`flex cursor-pointer items-center gap-3 px-4 py-2.5 select-none ${
+      className={`flex w-full cursor-pointer items-center gap-3 px-4 py-2.5 text-left select-none ${
         props.pinned ? 'bg-gray-100' : 'bg-white active:bg-gray-50'
       }`}
     >
@@ -179,6 +170,6 @@ function ConversationRow(props: {
         </div>
         <p className="mt-0.5 truncate text-[13px] text-gray-400">{props.preview}</p>
       </div>
-    </div>
+    </button>
   )
 }

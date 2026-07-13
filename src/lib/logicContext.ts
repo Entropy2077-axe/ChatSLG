@@ -1,4 +1,5 @@
 import { db } from '../db/db'
+import Dexie from 'dexie'
 import { retrieveWorldbookTrace } from './worldbook'
 import { ensureWorldInitialized, formatLocationTree } from './world'
 import type {
@@ -6,6 +7,7 @@ import type {
   Message, PerceivedEvent, PendingPhoneMessage, WorldbookEntry,
 } from '../types'
 import { outfitText } from './outfit'
+import { recentConversationMessages } from './conversationStats'
 
 export interface CharacterLogicState {
   character: Contact
@@ -79,8 +81,13 @@ export async function buildLogicContext(opts: {
     characterState(subject, appointments),
     Promise.all(participantContacts.map((item) => characterState(item, appointments))),
     db.contactMemories.where('contactId').equals(subject.id).toArray(),
-    db.perceivedEvents.where('characterId').equals(subject.id).reverse().limit(40).toArray(),
-    opts.conversationId ? db.messages.where('conversationId').equals(opts.conversationId).reverse().limit(40).toArray() : Promise.resolve([]),
+    db.perceivedEvents
+      .where('[characterId+observedAtStep]')
+      .between([subject.id, Dexie.minKey], [subject.id, Dexie.maxKey])
+      .reverse()
+      .limit(40)
+      .toArray(),
+    opts.conversationId ? recentConversationMessages(opts.conversationId, 40) : Promise.resolve([]),
     retrieveWorldbookTrace(opts.query || subject.name, { maxEntries: 6, maxChars: 5000 }),
   ])
   const activeMemories = memories
@@ -105,7 +112,7 @@ export async function buildLogicContext(opts: {
     participants: participantStates,
     perceivedEvents,
     perceivedEventText,
-    recentMessages: recentMessages.reverse(),
+    recentMessages,
     memories: activeMemories,
     worldbookEntries: worldbook.matches.map((item) => item.entry),
     worldbookText: worldbook.text,
@@ -114,19 +121,17 @@ export async function buildLogicContext(opts: {
   }
 }
 
-export function formatLogicContext(bundle: LogicContextBundle, opts: { includeLocationTree?: boolean; maxChars?: number } = {}): string {
+export function formatLogicContext(bundle: LogicContextBundle, opts: { includeLocationTree?: boolean; includePersona?: boolean; maxChars?: number } = {}): string {
   const state = bundle.subject
   const scheduleLine = (item: CharacterSchedule) => `${item.priority}:${item.dayOfWeek ?? `第${item.effectiveDay}天`}/${item.slot}@${item.locationId} ${item.activity} 手机${item.phoneAccess}`
   const treeSection = opts.includeLocationTree === false ? '' : `\n【完整有效地点树——只能引用这些地点ID】\n${bundle.locationTreeText}\n`
+  const personaSection = opts.includePersona === false ? '' : `\n【完整稳定人设】\n${personaText(state.character)}\n`
   const mandatory = `【ChatSLG不可违背的世界硬状态】
 世界版本:${bundle.worldVersion}
 当前时间:第${bundle.clock.day}天 ${String(bundle.clock.hour).padStart(2, '0')}:00(${bundle.clock.slot})
 用户位置:${bundle.playerLocationId}
 你的精确位置:${state.currentLocationId}
-${treeSection}
-
-【完整稳定人设】
-${personaText(state.character)}
+${treeSection}${personaSection}
 
 【基础日程】
 ${state.baseSchedule.map(scheduleLine).join('\n') || '暂无'}
@@ -156,4 +161,26 @@ ${state.commitments.map((item) => `commitment:第${item.day}天/${item.slot}@${i
   }
   if (keptMemories.length) result += memoryHeader + keptMemories.join('\n')
   return result
+}
+
+/** Compact state for the utility converter when a turn may contain a
+ * schedule or outfit action. It needs legal IDs and evidence, not another
+ * paid copy of the full persona and location descriptions. */
+export function formatActionContext(bundle: LogicContextBundle): string {
+  const state = bundle.subject
+  const parentIds = new Set(bundle.locations.map((location) => location.parentId).filter(Boolean))
+  const legalLocations = bundle.locations
+    .filter((location) => !parentIds.has(location.id))
+    .map((location) => `${location.id}=${location.name}`)
+    .join('；')
+  const scheduleLine = (item: CharacterSchedule) =>
+    `${item.priority}:${item.dayOfWeek ?? `第${item.effectiveDay}天`}/${item.slot}@${item.locationId} ${item.activity} 手机${item.phoneAccess}`
+  return `【结构动作硬状态】
+worldVersion=${bundle.worldVersion}；当前第${bundle.clock.day}天/${bundle.clock.slot}；用户位置=${bundle.playerLocationId}；角色位置=${state.currentLocationId}
+合法叶子地点ID：${legalLocations || '无'}
+基础日程：${state.baseSchedule.map(scheduleLine).join('；') || '无'}
+高优先级日程：${state.scheduleOverrides.map(scheduleLine).join('；') || '无'}
+明确约会：${state.commitments.map((item) => `${item.id}:第${item.day}天/${item.slot}@${item.locationId} ${item.description}`).join('；') || '无'}
+角色当前衣着：${outfitText(state.character.outfit)}
+实际感知事件：${bundle.perceivedEventText || '无'}`
 }

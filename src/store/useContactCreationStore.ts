@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 import type { PersonaGenerationResult } from '../lib/prompt'
-import type { ContactRelationLabel, TimeSlot } from '../types'
+import type { ContactRelationLabel, CustomPersonalityTrait, TimeSlot } from '../types'
 
 export interface RelationRow {
   key: string
@@ -19,6 +19,18 @@ export interface GenerateValues {
   relationRows: RelationRow[]
 }
 
+export interface ContactCreationInput {
+  mode: 'standard' | 'nuwa'
+  values: GenerateValues
+  extra: string
+  avatar: string
+  avatarManuallySet: boolean
+  realName: string
+  nickname: string
+  birthday: string
+  customTraits: CustomPersonalityTrait[]
+}
+
 export interface CreationDraft {
   parsed: PersonaGenerationResult
   values: GenerateValues
@@ -30,32 +42,51 @@ export interface CreationDraft {
   playerLocationId: string
 }
 
-type ProgressStep = 'persona' | 'avatar' | 'saving'
-type DraftSetter = CreationDraft | null | ((current: CreationDraft | null) => CreationDraft | null)
+export type ContactCreationStatus = 'queued' | 'persona' | 'avatar' | 'ready' | 'saving' | 'completed' | 'failed'
 
-interface ContactCreationState {
-  generating: boolean
-  progressStep: ProgressStep | null
+export interface ContactCreationJob {
+  id: string
+  status: ContactCreationStatus
+  input: ContactCreationInput
+  draft: CreationDraft | null
   error: string
-  creationDraft: CreationDraft | null
-  setGenerating: (generating: boolean) => void
-  setProgressStep: (progressStep: ProgressStep | null) => void
-  setError: (error: string) => void
-  setCreationDraft: (value: DraftSetter) => void
-  reset: () => void
+  createdAt: number
+  updatedAt: number
 }
 
-export const useContactCreationStore = create<ContactCreationState>((set) => ({
-  generating: false,
-  progressStep: null,
-  error: '',
-  creationDraft: null,
-  setGenerating: (generating) => set({ generating }),
-  setProgressStep: (progressStep) => set({ progressStep }),
-  setError: (error) => set({ error }),
-  setCreationDraft: (value) => set((state) => ({
-    creationDraft: typeof value === 'function' ? value(state.creationDraft) : value,
-  })),
-  reset: () => set({ generating: false, progressStep: null, error: '', creationDraft: null }),
-}))
+type JobPatch = Partial<Omit<ContactCreationJob, 'id' | 'createdAt'>>
 
+interface ContactCreationState {
+  jobs: ContactCreationJob[]
+  addJob: (job: ContactCreationJob) => void
+  updateJob: (id: string, patch: JobPatch) => void
+  updateDraft: (id: string, updater: (draft: CreationDraft) => CreationDraft) => void
+  removeJob: (id: string) => void
+  clearCompleted: () => void
+}
+
+function createContactCreationStore() {
+  return create<ContactCreationState>((set) => ({
+  jobs: [],
+  addJob: (job) => set((state) => ({ jobs: [...state.jobs, job] })),
+  updateJob: (id, patch) => set((state) => ({
+    jobs: state.jobs.map((job) => job.id === id ? { ...job, ...patch, updatedAt: Date.now() } : job),
+  })),
+  updateDraft: (id, updater) => set((state) => ({
+    jobs: state.jobs.map((job) => job.id === id && job.draft
+      ? { ...job, draft: updater(job.draft), updatedAt: Date.now() }
+      : job),
+  })),
+  removeJob: (id) => set((state) => ({ jobs: state.jobs.filter((job) => job.id !== id) })),
+  clearCompleted: () => set((state) => ({ jobs: state.jobs.filter((job) => job.status !== 'completed') })),
+  }))
+}
+
+type ContactCreationStore = ReturnType<typeof createContactCreationStore>
+const globalStore = globalThis as typeof globalThis & { __chatSlgContactCreationStore?: ContactCreationStore }
+
+// Vite/HMR and extension-normalized dynamic imports can evaluate this module more than once.
+// A single global instance keeps active background jobs attached to the app instead of silently
+// replacing the queue while a request is in flight.
+export const useContactCreationStore = globalStore.__chatSlgContactCreationStore ?? createContactCreationStore()
+globalStore.__chatSlgContactCreationStore = useContactCreationStore

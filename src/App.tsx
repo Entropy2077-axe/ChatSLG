@@ -1,4 +1,4 @@
-import { useEffect } from 'react'
+import { lazy, Suspense, useEffect, type ComponentType } from 'react'
 import { Navigate, Route, Routes, useLocation } from 'react-router-dom'
 import { App as CapacitorApp } from '@capacitor/app'
 import { useSettingsStore } from './store/useSettingsStore'
@@ -6,33 +6,34 @@ import { installConsoleCapture } from './lib/consoleCapture'
 import { TabLayout } from './components/TabLayout'
 import { NotificationBanner } from './components/NotificationBanner'
 import { AppErrorBoundary } from './components/AppErrorBoundary'
-import { ensureLegacyWorldviewMigrated } from './lib/worldbook'
-import { ensureWorldInitialized } from './lib/world'
-import { MessagesPage } from './pages/MessagesPage'
-import { PhonePage } from './pages/PhonePage'
-import { DialoguePage } from './pages/DialoguePage'
-import { ContactsPage } from './pages/ContactsPage'
-import { WorldPage } from './pages/WorldPage'
-import { ChatPage } from './pages/ChatPage'
-import { ContactCardPage } from './pages/ContactCardPage'
-import { ContactAddPage } from './pages/ContactAddPage'
-import { GroupAddPage } from './pages/GroupAddPage'
-import { GroupInfoPage } from './pages/GroupInfoPage'
-import { MomentsPage } from './pages/MomentsPage'
-import { SettingsPage } from './pages/SettingsPage'
-import { ProfileEditPage } from './pages/ProfileEditPage'
-import { WorldSettingsPage } from './pages/WorldSettingsPage'
-import { RelationshipsPage } from './pages/RelationshipsPage'
-import { ShopPage } from './pages/ShopPage'
-import { WarehousePage } from './pages/WarehousePage'
-import { WorkPage } from './pages/WorkPage'
-import { InterviewPage } from './pages/InterviewPage'
-import { SaveLoadPage } from './pages/SaveLoadPage'
-import { SkyEyePage } from './pages/SkyEyePage'
-import { SocialInboxPage } from './pages/SocialInboxPage'
-import { SceneArchivePage } from './pages/SceneArchivePage'
-import { NewWorldPage } from './pages/NewWorldPage'
 import { WebPrivacyNotice } from './components/WebPrivacyNotice'
+
+const page = <T extends Record<K, ComponentType>, K extends keyof T>(loader: () => Promise<T>, name: K) =>
+  lazy(async () => ({ default: (await loader())[name] }))
+const MessagesPage = page(() => import('./pages/MessagesPage'), 'MessagesPage')
+const PhonePage = page(() => import('./pages/PhonePage'), 'PhonePage')
+const DialoguePage = page(() => import('./pages/DialoguePage'), 'DialoguePage')
+const ContactsPage = page(() => import('./pages/ContactsPage'), 'ContactsPage')
+const WorldPage = page(() => import('./pages/WorldPage'), 'WorldPage')
+const ChatPage = page(() => import('./pages/ChatPage'), 'ChatPage')
+const ContactCardPage = page(() => import('./pages/ContactCardPage'), 'ContactCardPage')
+const ContactAddPage = page(() => import('./pages/ContactAddPage'), 'ContactAddPage')
+const GroupAddPage = page(() => import('./pages/GroupAddPage'), 'GroupAddPage')
+const GroupInfoPage = page(() => import('./pages/GroupInfoPage'), 'GroupInfoPage')
+const MomentsPage = page(() => import('./pages/MomentsPage'), 'MomentsPage')
+const SettingsPage = page(() => import('./pages/SettingsPage'), 'SettingsPage')
+const ProfileEditPage = page(() => import('./pages/ProfileEditPage'), 'ProfileEditPage')
+const WorldSettingsPage = page(() => import('./pages/WorldSettingsPage'), 'WorldSettingsPage')
+const RelationshipsPage = page(() => import('./pages/RelationshipsPage'), 'RelationshipsPage')
+const ShopPage = page(() => import('./pages/ShopPage'), 'ShopPage')
+const WarehousePage = page(() => import('./pages/WarehousePage'), 'WarehousePage')
+const WorkPage = page(() => import('./pages/WorkPage'), 'WorkPage')
+const InterviewPage = page(() => import('./pages/InterviewPage'), 'InterviewPage')
+const SaveLoadPage = page(() => import('./pages/SaveLoadPage'), 'SaveLoadPage')
+const SkyEyePage = page(() => import('./pages/SkyEyePage'), 'SkyEyePage')
+const SocialInboxPage = page(() => import('./pages/SocialInboxPage'), 'SocialInboxPage')
+const SceneArchivePage = page(() => import('./pages/SceneArchivePage'), 'SceneArchivePage')
+const NewWorldPage = page(() => import('./pages/NewWorldPage'), 'NewWorldPage')
 // Runs once at module load, regardless of admin mode — so there's already
 // log history by the time someone opens "天眼".
 installConsoleCapture()
@@ -70,8 +71,8 @@ function App() {
   const animationsEnabled = useSettingsStore((s) => s.animationsEnabled ?? true)
   const adminModeEnabled = useSettingsStore((s) => s.adminModeEnabled)
   const location = useLocation()
-  useEffect(() => { void ensureWorldInitialized() }, [])
-  useEffect(() => { void ensureLegacyWorldviewMigrated() }, [])
+  useEffect(() => { void import('./lib/world').then(({ ensureWorldInitialized }) => ensureWorldInitialized()) }, [])
+  useEffect(() => { void import('./lib/worldbook').then(({ ensureLegacyWorldviewMigrated }) => ensureLegacyWorldviewMigrated()) }, [])
 
   useEffect(() => {
     document.documentElement.dataset.theme = themeMode
@@ -89,10 +90,11 @@ function App() {
   }, [location.pathname, animationsEnabled])
 
   return (
-    <AppErrorBoundary key={location.key}>
+    <AppErrorBoundary>
       <div className={`app-shell ${themeMode === 'dark' ? 'theme-dark' : ''}`}>
         <NotificationBanner />
         <WebPrivacyNotice />
+        <Suspense fallback={<div className="flex flex-1 items-center justify-center text-sm text-gray-400">加载中…</div>}>
         <Routes>
         <Route element={<TabLayout />}>
           <Route path="/" element={<Navigate to="/phone" replace />} />
@@ -126,7 +128,9 @@ function App() {
         {adminModeEnabled && (
           <Route path="/sky-eye" element={<SkyEyePage />} />
         )}
+        <Route path="*" element={<Navigate to="/phone" replace />} />
         </Routes>
+        </Suspense>
       </div>
     </AppErrorBoundary>
   )

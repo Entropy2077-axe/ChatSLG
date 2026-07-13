@@ -2,7 +2,7 @@ import { create } from 'zustand'
 import { v4 as uuid } from 'uuid'
 import { db } from '../db/db'
 import { chatCompletion, coalesceConsecutiveRoles, type ChatMessage } from './deepseek'
-import { extractJsonObject, parseAiResponse, typingDelayMs } from './aiProtocol'
+import { extractJsonObject, parseAiResponse, parseRawPrivateDraft, rawPrivateDraftNeedsUtility, serializePrivateTurn } from './aiProtocol'
 import { formatSpeechSamplesForScene, buildRawChatPrompt, buildJsonConversionPrompt, customPersonalityTraitsLine } from './prompt'
 import { retrieveWorldbookTrace } from './worldbook'
 import { isModuleEnabled } from '../features'
@@ -12,16 +12,17 @@ import { describeCurrentTime, ageFromBirthday } from './time'
 import { describeCurrentSchedule, describeUpcomingScheduleText } from './schedule'
 import { displayName } from './contact'
 import { previewForMessage } from './messagePreview'
-import { validatePrivateTurn } from './responseQuality'
+import { shouldReviewPrivateTurn, validatePrivateTurn } from './responseQuality'
 import { recentSocialEventsText } from './socialEvents'
 import { recentSharedOriginalContext } from './sharedRecentContext'
 import { useChatUiStore } from '../store/useChatUiStore'
 import { enqueueSelfIterationTask } from './selfIteration'
 import { USER_WALLET_ID, balanceOf, reserveRedPacket, transferFunds } from './finance'
-import { buildLogicContext, formatLogicContext } from './logicContext'
+import { buildLogicContext, formatActionContext, formatLogicContext } from './logicContext'
 import { applyOutfitChangeProposal } from './outfitChange'
 import { ensureWorldInitialized, isLeafLocation, resolveSchedule } from './world'
 import type { AiBubble, AppSettings, Contact, Message, MessageType, Sticker } from '../types'
+import { messagesForAiTurn, recentConversationMessages } from './conversationStats'
 
 /**
  * Per-conversation AI-turn state, deliberately kept in a module-level
@@ -84,6 +85,18 @@ function clearPending(conversationId: string) {
   timersByConversation.get(conversationId)?.forEach(clearTimeout)
   timersByConversation.set(conversationId, [])
   abortByConversation.get(conversationId)?.abort()
+}
+
+function beginTurn(conversationId: string, streamId: string): AbortController {
+  clearPending(conversationId)
+  streamByConversation.set(conversationId, streamId)
+  const controller = new AbortController()
+  abortByConversation.set(conversationId, controller)
+  return controller
+}
+
+function isCurrentTurn(conversationId: string, streamId: string): boolean {
+  return streamByConversation.get(conversationId) === streamId
 }
 
 export function formatStructuredHistoryEvent(
@@ -227,8 +240,7 @@ export async function sendMessage(
   }
 
   const streamId = uuid()
-  streamByConversation.set(conversationId, streamId)
-  clearPending(conversationId)
+  const controller = beginTurn(conversationId, streamId)
   useChatEngineStore.getState().patch(conversationId, { error: '', typingLabel: displayName(contact) })
 
   const msg: Message = {
@@ -259,7 +271,8 @@ export async function sendMessage(
   }
   await db.perceivedEvents.put({ id: uuid(), eventId: msg.id, characterId: contact.id, perception: 'full', observedAtStep: world.step })
 
-  runAiTurn(conversationId, contact, settings, stickers, streamId, text.trim())
+  if (!isCurrentTurn(conversationId, streamId) || controller.signal.aborted) return
+  void runAiTurn(conversationId, contact, settings, stickers, streamId, controller, text.trim())
 }
 
 /**
@@ -278,10 +291,9 @@ export async function triggerAiTurn(
   proactiveContext = '',
 ): Promise<void> {
   const streamId = uuid()
-  streamByConversation.set(conversationId, streamId)
-  clearPending(conversationId)
+  const controller = beginTurn(conversationId, streamId)
   useChatEngineStore.getState().patch(conversationId, { error: '', typingLabel: displayName(contact) })
-  await runAiTurn(conversationId, contact, settings, stickers, streamId, '', proactiveContext)
+  await runAiTurn(conversationId, contact, settings, stickers, streamId, controller, '', proactiveContext)
 }
 
 export async function regenerateAiTurn(
@@ -297,20 +309,16 @@ export async function regenerateAiTurn(
   }
 
   const streamId = uuid()
-  streamByConversation.set(conversationId, streamId)
-  clearPending(conversationId)
+  const controller = beginTurn(conversationId, streamId)
   useChatEngineStore.getState().patch(conversationId, { error: '', typingLabel: displayName(contact) })
 
-  const turnMessages = await db.messages
-    .where('conversationId')
-    .equals(conversationId)
-    .filter((message) => message.debugAiTurnId === aiTurnId)
-    .toArray()
+  const turnMessages = await messagesForAiTurn(aiTurnId)
   if (turnMessages.length > 0) await db.messages.bulkDelete(turnMessages.map((message) => message.id))
   await db.aiTurns.delete(aiTurnId)
   await db.conversations.update(conversationId, { updatedAt: Date.now() })
 
-  await runAiTurn(conversationId, contact, settings, stickers, streamId)
+  if (!isCurrentTurn(conversationId, streamId) || controller.signal.aborted) return
+  await runAiTurn(conversationId, contact, settings, stickers, streamId, controller)
 }
 
 async function runAiTurn(
@@ -319,6 +327,7 @@ async function runAiTurn(
   settings: AppSettings,
   stickers: Sticker[],
   streamId: string,
+  controller: AbortController,
   _triggeringUserText = '',
   proactiveContext = '',
 ): Promise<void> {
@@ -328,13 +337,15 @@ async function runAiTurn(
   engine.patch(conversationId, { aiTyping: true, error: '', typingLabel: displayName(contact) })
   console.log(`[chat] 开始生成回复 对方=${displayName(contact)} conversationId=${conversationId}`)
   try {
-    const history = await db.messages.where('conversationId').equals(conversationId).sortBy('createdAt')
+    const history = await recentConversationMessages(conversationId, Math.max(CONTEXT_WINDOW_SIZE, 40))
     const logicBundle = await buildLogicContext({
       subjectId: contact.id,
       conversationId,
       query: [_triggeringUserText, contact.name].filter(Boolean).join(' '),
     })
-    const logicContextText = formatLogicContext(logicBundle)
+    if (!isCurrentTurn(conversationId, streamId)) return
+    const logicContextText = formatLogicContext(logicBundle, { includeLocationTree: false, includePersona: false, maxChars: 24_000 })
+    const actionContextText = formatActionContext(logicBundle)
 
     // Notable things that happened outside the chat itself (e.g. the user
     // liked this contact's moment) get mentioned once then cleared, rather
@@ -353,7 +364,11 @@ async function runAiTurn(
       ? `\n【经济状况】你的可用余额：${await balanceOf(contact.id)}；对方可用余额：${await balanceOf(USER_WALLET_ID)}。未结清借款：${(await db.loans.filter(l => l.status === 'active' && (l.lenderId === contact.id || l.borrowerId === contact.id)).toArray()).map(l => `${l.borrowerId === contact.id ? '你欠对方' : '对方欠你'}${l.outstanding}`).join('；') || '无'}。所有金钱动作必须量力而行，不得凭空造钱。`
       : ''
     const socialMemories = await socialMemoriesText(contact.id)
-    const sharedOriginalContext = await recentSharedOriginalContext([contact.id], settings.userNickname, { maxMessages: 90, maxChars: 16_000 })
+    const sharedOriginalContext = await recentSharedOriginalContext([contact.id], settings.userNickname, {
+      maxMessages: 50,
+      maxChars: 8_000,
+      excludeConversationId: conversationId,
+    })
     const lifeEventText = isModuleEnabled('lifeSimulation')
       ? (await db.lifeEvents.where('contactId').equals(contact.id).reverse().sortBy('occurredAt')).slice(0, 4).map((event) => event.summary).join('；')
       : ''
@@ -395,10 +410,10 @@ async function runAiTurn(
     })
 
     const recentHistory = history.slice(-CONTEXT_WINDOW_SIZE)
-    const controller = new AbortController()
-    abortByConversation.set(conversationId, controller)
     const chatMessages: ChatMessage[] = coalesceConsecutiveRoles([
-      { role: 'system', content: [logicContextText, contextSections, socialMemories, sharedOriginalContext].filter(Boolean).join('\n\n') },
+      // Stable persona/style comes first so DeepSeek's prefix cache can match
+      // before the per-turn world state and cross-scene records diverge.
+      { role: 'system', content: [contextSections, logicContextText, socialMemories, sharedOriginalContext].filter(Boolean).join('\n\n') },
       ...recentHistory.map((m): ChatMessage => {
         if (m.type === 'sticker') return formatStructuredHistoryEvent(m, 'sticker')
         if (m.type === 'link') return formatStructuredHistoryEvent(m, 'link')
@@ -418,32 +433,51 @@ async function runAiTurn(
       signal: controller.signal,
       purpose: proactiveContext ? 'proactive' : 'chat',
       automatic: !!proactiveContext,
+      thinking: 'disabled',
+      maxTokens: proactiveContext ? 900 : 1200,
+      temperature: 0.9,
       trace: { turnId: streamId, stage: 'first_chat', conversationId },
     })
 
     if (streamByConversation.get(conversationId) !== streamId) return
     console.log(`[chat] 主模型回复(${rawText.length}字): ${rawText.slice(0, 100)}...`)
 
-    // ---- Step 2: utility model converts raw text to JSON ----
-    let conversionPrompt = buildJsonConversionPrompt(rawText, logicContextText)
-    let jsonRaw = await chatCompletion({
-      apiKey: settings.apiKey,
-      baseUrl: settings.baseUrl,
-      model: settings.utilityModel,
-      messages: [
-        { role: 'system', content: conversionPrompt },
-      ],
-      jsonMode: true,
-      signal: controller.signal,
-      purpose: proactiveContext ? 'proactive' : 'chat',
-      automatic: !!proactiveContext,
-      trace: { turnId: streamId, stage: 'other', conversationId },
-    })
-
-    if (streamByConversation.get(conversationId) !== streamId) return
-    console.log(`[chat] 多功能模型转换JSON: ${jsonRaw.slice(0, 200)}`)
+    // Ordinary text and finance markers are mechanical, so parse them locally.
+    // Only schedule/outfit intent or a malformed draft pays for utility JSON.
+    const localTurn = parseRawPrivateDraft(rawText, activeMood)
+    const needsUtility = localTurn.bubbles.length === 0 || rawPrivateDraftNeedsUtility(rawText, _triggeringUserText)
+    let conversionPrompt = '本轮使用本地草稿解析，无额外模型调用。'
+    let jsonRaw = serializePrivateTurn(localTurn)
+    let parsedTurn = localTurn
+    if (needsUtility) {
+      conversionPrompt = buildJsonConversionPrompt(
+        rawText,
+        actionContextText,
+        formatRecentConversationForReview(recentHistory.slice(-8), contact),
+      )
+      jsonRaw = await chatCompletion({
+        apiKey: settings.apiKey,
+        baseUrl: settings.baseUrl,
+        model: settings.utilityModel,
+        messages: [{ role: 'system', content: conversionPrompt }],
+        jsonMode: true,
+        signal: controller.signal,
+        purpose: proactiveContext ? 'proactive' : 'chat',
+        automatic: !!proactiveContext,
+        skipAutomaticBudgetCheck: !!proactiveContext,
+        thinking: 'disabled',
+        temperature: 0.1,
+        maxTokens: 900,
+        trace: { turnId: streamId, stage: 'other', conversationId },
+      })
+      if (!isCurrentTurn(conversationId, streamId)) return
+      const converted = parseAiResponse(jsonRaw)
+      if (converted.bubbles.length > 0) parsedTurn = converted
+      else jsonRaw = serializePrivateTurn(localTurn)
+      console.log(`[chat] 结构动作转换JSON: ${jsonRaw.slice(0, 200)}`)
+    }
     let finalRaw = jsonRaw
-    let { bubbles, knowledgeQueries, mood: turnMood, thought: turnThought, outfitChange: turnOutfitChange } = parseAiResponse(finalRaw)
+    let { bubbles, knowledgeQueries, mood: turnMood, thought: turnThought, outfitChange: turnOutfitChange } = parsedTurn
     const qualityCheckDebug = {
       enabled: true,
       repaired: false,
@@ -452,7 +486,7 @@ async function runAiTurn(
     }
 
     // Core quality gate: always check logical grounding and repair when needed.
-    if (bubbles.length > 0) {
+    if (bubbles.length > 0 && shouldReviewPrivateTurn({ latestUserText: _triggeringUserText, rawText, bubbles })) {
       const checked = await validatePrivateTurn({
         settings,
         contact,
@@ -525,7 +559,7 @@ async function runAiTurn(
       },
       createdAt: Date.now(),
     })
-    revealBubbles(
+    await revealBubbles(
       conversationId,
       contact,
       settings,
@@ -547,10 +581,12 @@ async function runAiTurn(
     const message = err instanceof Error ? err.message : String(err)
     console.error(`[chat] 生成回复出错 对方=${displayName(contact)}:`, message)
     engine.patch(conversationId, { error: message, aiTyping: false, typingLabel: undefined })
+  } finally {
+    if (abortByConversation.get(conversationId) === controller) abortByConversation.delete(conversationId)
   }
 }
 
-function revealBubbles(
+async function revealBubbles(
   conversationId: string,
   contact: Contact,
   settings: AppSettings,
@@ -565,21 +601,17 @@ function revealBubbles(
   logicWorldVersion?: number,
   sourceEventId?: string,
   logicContextText?: string,
-): void {
-  const timers: ReturnType<typeof setTimeout>[] = []
-  let cumulative = 0
-  bubbles.forEach((bubble, i) => {
-    cumulative += typingDelayMs(bubble)
-    const timer = setTimeout(async () => {
-      if (streamByConversation.get(conversationId) !== streamId) return
-      if (logicWorldVersion !== undefined) {
-        const latestWorld = await db.worldState.get('global')
-        if (!latestWorld || latestWorld.worldVersion !== logicWorldVersion) {
-          streamByConversation.delete(conversationId)
-          useChatEngineStore.getState().patch(conversationId, { error: '地点树已变化，本轮剩余回复已取消', aiTyping: false, typingLabel: undefined })
-          return
-        }
-      }
+): Promise<void> {
+  if (logicWorldVersion !== undefined) {
+    const latestWorld = await db.worldState.get('global')
+    if (!latestWorld || latestWorld.worldVersion !== logicWorldVersion) {
+      useChatEngineStore.getState().patch(conversationId, { error: '地点树已变化，本轮回复已取消', aiTyping: false, typingLabel: undefined })
+      return
+    }
+  }
+
+  const preparedMessages: Message[] = []
+  for (const [i, bubble] of bubbles.entries()) {
 
       if (bubble.type === 'scheduleChange') {
         const [world, location, sourceEvent] = await Promise.all([
@@ -589,7 +621,7 @@ function revealBubbles(
         if (!world || bubble.worldVersion !== world.worldVersion || logicWorldVersion !== world.worldVersion ||
           !location || !await isLeafLocation(bubble.locationId) || bubble.effectiveDay < world.day || !legalSource) {
           console.warn('[schedule] 已拒绝过期、非法地点或无来源的日程动作', bubble)
-          return
+           continue
         }
         await db.transaction('rw', db.characterSchedules, db.appointments, async () => {
           await db.characterSchedules.add({
@@ -608,18 +640,18 @@ function revealBubbles(
       }
       let finance: Message['finance']
       if (bubble.type === 'transfer') {
-        try { const tx = await transferFunds({ from: contact.id, to: USER_WALLET_ID, amount: bubble.amount, kind: 'transfer', note: bubble.note, idempotencyKey: `ai:${streamId}:${i}` }); finance = { transactionId: tx.id, amount: tx.amount, note: bubble.note, status: 'completed' } } catch (err) { console.warn('[finance] AI转账被拒绝', err); return }
+        try { const tx = await transferFunds({ from: contact.id, to: USER_WALLET_ID, amount: bubble.amount, kind: 'transfer', note: bubble.note, idempotencyKey: `ai:${streamId}:${i}` }); finance = { transactionId: tx.id, amount: tx.amount, note: bubble.note, status: 'completed' } } catch (err) { console.warn('[finance] AI转账被拒绝', err); continue }
       } else if (bubble.type === 'redPacket') {
-        try { const tx = await reserveRedPacket(contact.id, bubble.amount, bubble.note); finance = { transactionId: tx.id, amount: tx.amount, note: bubble.note, status: 'pending' } } catch (err) { console.warn('[finance] AI红包被拒绝', err); return }
+        try { const tx = await reserveRedPacket(contact.id, bubble.amount, bubble.note); finance = { transactionId: tx.id, amount: tx.amount, note: bubble.note, status: 'pending' } } catch (err) { console.warn('[finance] AI红包被拒绝', err); continue }
       } else if (bubble.type === 'loanRequest') {
         const loanId = uuid(); await db.loans.add({ id: loanId, lenderId: USER_WALLET_ID, borrowerId: contact.id, principal: bubble.amount, outstanding: bubble.amount, note: bubble.note, status: 'pending', createdAt: Date.now() }); finance = { loanId, amount: bubble.amount, note: bubble.note, status: 'pending' }
       } else if (bubble.type === 'loanDecision' && bubble.loanId) {
         const loan = await db.loans.get(bubble.loanId)
-        if (!loan || loan.status !== 'pending' || loan.borrowerId !== USER_WALLET_ID || loan.lenderId !== contact.id) return
+        if (!loan || loan.status !== 'pending' || loan.borrowerId !== USER_WALLET_ID || loan.lenderId !== contact.id) continue
         if (bubble.decision === 'accept') { try { await transferFunds({ from: contact.id, to: USER_WALLET_ID, amount: loan.principal, kind: 'loan', note: loan.note, idempotencyKey: `loan:${loan.id}` }); await db.loans.update(loan.id,{status:'active',resolvedAt:Date.now()}); finance={loanId:loan.id,amount:loan.principal,note:loan.note,status:'accepted'} } catch { await db.loans.update(loan.id,{status:'rejected',resolvedAt:Date.now()}); finance={loanId:loan.id,amount:loan.principal,status:'rejected'} } } else { await db.loans.update(loan.id,{status:'rejected',resolvedAt:Date.now()}); finance={loanId:loan.id,amount:loan.principal,status:'rejected'} }
       } else if (bubble.type === 'giftPurchase') {
-        if (!bubble.name) return
-        try { const tx = await transferFunds({ from: contact.id, amount: bubble.amount, kind: 'purchase', note: `送给用户：${bubble.name}`, idempotencyKey: `ai-gift:${streamId}:${i}` }); finance = { transactionId: tx.id, amount: tx.amount, note: bubble.description, status: 'completed' } } catch (err) { console.warn('[finance] AI购买礼物被拒绝', err); return }
+        if (!bubble.name) continue
+        try { const tx = await transferFunds({ from: contact.id, amount: bubble.amount, kind: 'purchase', note: `送给用户：${bubble.name}`, idempotencyKey: `ai-gift:${streamId}:${i}` }); finance = { transactionId: tx.id, amount: tx.amount, note: bubble.description, status: 'completed' } } catch (err) { console.warn('[finance] AI购买礼物被拒绝', err); continue }
       }
 
       let content: string
@@ -655,61 +687,57 @@ function revealBubbles(
         debugParsedBubble: bubble,
         debugRawAiResponse: i === bubbles.length - 1 ? (finalRaw || '') : undefined,
         thought: turnThought && i === bubbles.length - 1 ? turnThought : undefined,
-        createdAt: Date.now(),
-      }
+         createdAt: Date.now() + i,
+       }
       if (turnThought && i === bubbles.length - 1) {
         console.log(`[chat] 想法已存入消息: ${turnThought}`)
       }
-      await db.messages.add(msg)
-      await db.conversations.update(conversationId, { updatedAt: Date.now() })
+    preparedMessages.push(msg)
+  }
 
-      // Only pop a notification if the user isn't already looking at this
-      // exact conversation right now.
-      if (useChatUiStore.getState().activeConversationId !== conversationId) {
-        useChatUiStore.getState().showNotification({
-          id: uuid(),
-          conversationId,
-          contactName: displayName(contact),
-          contactAvatar: contact.avatar,
-          contactAvatarColor: contact.avatarColor,
-          preview: previewForMessage(msg),
-        })
-      }
-
-      if (i === bubbles.length - 1) {
-        useChatEngineStore.getState().patch(conversationId, { aiTyping: false, typingLabel: undefined })
-        if (injectedIntentIds.length > 0) {
-          await markIntentsUsed(contact.id, injectedIntentIds)
-        }
-        const memoryUpdate = await maybeUpdateMemory(contact.id, conversationId, settings, logicContextText)
-        if (memoryUpdate) {
-          const turn = await db.aiTurns.get(aiTurnId)
-          const parsed =
-            turn?.parsed && typeof turn.parsed === 'object'
-              ? { ...(turn.parsed as Record<string, unknown>), memoryUpdate }
-              : { memoryUpdate }
-          await db.aiTurns.update(aiTurnId, { parsed })
-        }
-        if (turnMood) {
-          await db.contacts.update(contact.id, {
-            mood: { text: turnMood, expiresAt: Date.now() + settings.moodExpiryMs },
-          })
-        }
-        if (_triggeringUserText && isModuleEnabled('selfIteration')) {
-          enqueueSelfIterationTask({
-            conversationId,
-            contactId: contact.id,
-            contactName: contact.name,
-            latestUserText: _triggeringUserText,
-            latestAssistantText: bubbles
-              .map((b) => (b.type === 'text' ? b.content : `[${b.type}] ${'name' in b ? b.name : 'label' in b ? b.label : 'summary' in b ? b.summary : 'query' in b ? b.query : b.note ?? b.amount}`))
-              .join('\n'),
-          })
-        }
-      }
-    }, cumulative)
-    timers.push(timer)
+  if (preparedMessages.length === 0) {
+    useChatEngineStore.getState().patch(conversationId, { error: '结构动作未通过本地校验', aiTyping: false, typingLabel: undefined })
+    return
+  }
+  await db.transaction('rw', db.messages, db.conversations, async () => {
+    await db.messages.bulkAdd(preparedMessages)
+    await db.conversations.update(conversationId, { updatedAt: preparedMessages.at(-1)!.createdAt })
   })
-  timersByConversation.set(conversationId, timers)
+  useChatEngineStore.getState().patch(conversationId, { aiTyping: false, typingLabel: undefined })
+  if (streamByConversation.get(conversationId) === streamId) streamByConversation.delete(conversationId)
+
+  const lastMessage = preparedMessages.at(-1)!
+  if (useChatUiStore.getState().activeConversationId !== conversationId) {
+    useChatUiStore.getState().showNotification({
+      id: uuid(), conversationId, contactName: displayName(contact), contactAvatar: contact.avatar,
+      contactAvatarColor: contact.avatarColor, preview: previewForMessage(lastMessage),
+    })
+  }
+  if (injectedIntentIds.length > 0) await markIntentsUsed(contact.id, injectedIntentIds)
+  if (turnMood) {
+    await db.contacts.update(contact.id, { mood: { text: turnMood, expiresAt: Date.now() + settings.moodExpiryMs } })
+  }
+  if (_triggeringUserText && isModuleEnabled('selfIteration')) {
+    enqueueSelfIterationTask({
+      conversationId,
+      contactId: contact.id,
+      contactName: contact.name,
+      latestUserText: _triggeringUserText,
+      latestAssistantText: bubbles
+        .map((bubble) => (bubble.type === 'text' ? bubble.content : `[${bubble.type}] ${'name' in bubble ? bubble.name : 'label' in bubble ? bubble.label : 'summary' in bubble ? bubble.summary : 'query' in bubble ? bubble.query : bubble.note ?? bubble.amount}`))
+        .join('\n'),
+    })
+  }
+
+  // Memory extraction is intentionally after visible reply persistence and
+  // typing-state completion; it must never delay the paid response appearing.
+  void maybeUpdateMemory(contact.id, conversationId, settings, logicContextText).then(async (memoryUpdate) => {
+    if (!memoryUpdate) return
+    const turn = await db.aiTurns.get(aiTurnId)
+    const parsed = turn?.parsed && typeof turn.parsed === 'object'
+      ? { ...(turn.parsed as Record<string, unknown>), memoryUpdate }
+      : { memoryUpdate }
+    await db.aiTurns.update(aiTurnId, { parsed })
+  }).catch(() => undefined)
 }
 

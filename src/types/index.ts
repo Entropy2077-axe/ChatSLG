@@ -464,7 +464,25 @@ export interface AppSettings {
 
 export interface AdminLogRecord { id: string; level: 'log' | 'info' | 'warn' | 'error'; message: string; createdAt: number }
 export type AdminAiTraceStage = 'first_chat' | 'first_quality' | 'second_chat' | 'other' | 'second_quality'
-export interface AdminAiTrace { id: string; purpose: AiUsagePurpose; model: string; messages: { role: string; content: string }[]; output?: string; error?: string; inputTokens: number; outputTokens: number; createdAt: number; turnId?: string; stage?: AdminAiTraceStage; conversationId?: string }
+export interface AdminAiTrace {
+  id: string
+  purpose: AiUsagePurpose
+  model: string
+  messages: { role: string; content: string }[]
+  output?: string
+  error?: string
+  inputTokens: number
+  outputTokens: number
+  cacheHitTokens?: number
+  cacheMissTokens?: number
+  reasoningTokens?: number
+  latencyMs?: number
+  finishReason?: string
+  createdAt: number
+  turnId?: string
+  stage?: AdminAiTraceStage
+  conversationId?: string
+}
 export interface SaveSlot { id: string; slot: number; name: string; createdAt: number; updatedAt: number; snapshot: unknown }
 
 export type WalletOwnerId = 'user' | string
@@ -826,6 +844,11 @@ export interface AiUsageRecord {
   estimated: boolean
   createdAt: number
   error?: string
+  cacheHitTokens?: number
+  cacheMissTokens?: number
+  reasoningTokens?: number
+  latencyMs?: number
+  finishReason?: string
 }
 
 export interface CustomWarmthRule {

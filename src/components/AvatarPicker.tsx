@@ -105,9 +105,9 @@ export function AvatarPicker({ onSelect, onClose, pexelsApiKey }: AvatarPickerPr
         )}
 
         <div className="grid grid-cols-6 gap-2">
-          {AVATAR_EMOJIS.map((e) => (
+          {AVATAR_EMOJIS.map((e, index) => (
             <button
-              key={e}
+              key={`${e}-${index}`}
               onClick={() => {
                 onSelect(e)
                 onClose()

@@ -3,7 +3,7 @@ import { NavLink } from 'react-router-dom'
 import { useLiveQuery } from 'dexie-react-hooks'
 import { db } from '../db/db'
 import { UnreadBadge } from './UnreadBadge'
-import { unreadCountFor } from '../lib/unread'
+import { totalUnreadForConversations } from '../lib/conversationStats'
 import { momentsUnreadCount } from '../lib/momentsUnread'
 import { useSettingsStore } from '../store/useSettingsStore'
 
@@ -16,23 +16,11 @@ const EMPTY_ARRAY: never[] = []
 
 export function BottomNav() {
   const conversations = useLiveQuery(() => db.conversations.filter((item) => item.channel !== 'scene').toArray(), []) ?? EMPTY_ARRAY
-  const messages = useLiveQuery(() => db.messages.toArray(), []) ?? EMPTY_ARRAY
   const moments = useLiveQuery(() => db.moments.toArray(), []) ?? EMPTY_ARRAY
   const socialEvents = useLiveQuery(() => db.socialEvents.toArray(), []) ?? EMPTY_ARRAY
   const momentsLastReadAt = useSettingsStore((s) => s.momentsLastReadAt)
 
-  const totalUnread = useMemo(() => {
-    const messagesByConv = new Map<string, typeof messages>()
-    for (const m of messages) {
-      const arr = messagesByConv.get(m.conversationId) ?? []
-      arr.push(m)
-      messagesByConv.set(m.conversationId, arr)
-    }
-    return conversations.reduce(
-      (sum, c) => sum + unreadCountFor(c.lastReadAt, messagesByConv.get(c.id) ?? []),
-      0,
-    )
-  }, [conversations, messages])
+  const totalUnread = useLiveQuery(() => totalUnreadForConversations(conversations), [conversations]) ?? 0
   const momentsUnread = useMemo(
     () => momentsUnreadCount({ lastReadAt: momentsLastReadAt, moments, socialEvents }),
     [momentsLastReadAt, moments, socialEvents],
@@ -44,17 +32,17 @@ export function BottomNav() {
         <NavLink
           key={to}
           to={to}
-          end={to === '/phone'}
+          end={false}
           className={({ isActive }) =>
             `flex flex-1 flex-col items-center gap-0.5 py-2 text-[11px] ${
               isActive ? 'text-gray-900' : 'text-gray-400'
             }`
           }
         >
-          {({ isActive }) => (
+          {() => (
             <>
               <div className="relative">
-                <Icon active={isActive} />
+                <Icon />
                 {to === '/phone' && <UnreadBadge count={totalUnread + momentsUnread} className="absolute -top-1 -right-2" />}
               </div>
               <span>{label}</span>
@@ -66,25 +54,25 @@ export function BottomNav() {
   )
 }
 
-function MessageIcon({ active }: { active: boolean }) {
+function MessageIcon() {
   return (
     <svg width="22" height="22" viewBox="0 0 24 24" fill="none">
       <path
         d="M4 5h16a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H9l-4.4 3.3A.6.6 0 0 1 3 19.8V6a1 1 0 0 1 1-1Z"
-        stroke={active ? '#111827' : '#9ca3af'}
+        stroke="currentColor"
         strokeWidth="1.7"
         strokeLinejoin="round"
       />
     </svg>
   )
 }
-function ContactIcon({ active }: { active: boolean }) {
+function ContactIcon() {
   return (
     <svg width="22" height="22" viewBox="0 0 24 24" fill="none">
-      <circle cx="12" cy="8" r="3.2" stroke={active ? '#111827' : '#9ca3af'} strokeWidth="1.7" />
+      <circle cx="12" cy="8" r="3.2" stroke="currentColor" strokeWidth="1.7" />
       <path
         d="M5 19c1.2-3.2 3.8-5 7-5s5.8 1.8 7 5"
-        stroke={active ? '#111827' : '#9ca3af'}
+        stroke="currentColor"
         strokeWidth="1.7"
         strokeLinecap="round"
       />

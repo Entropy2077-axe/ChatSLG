@@ -18,6 +18,8 @@ export const CONTEXT_WINDOW_SIZE = 30
 const MAX_UPCOMING_PLANS = 8
 const MEMORY_CONFIDENCE_THRESHOLD = 60
 const RELATIONSHIP_CONFIDENCE_THRESHOLD = 80
+const memoryUpdateLocks = new Map<string, Promise<MemoryUpdateDebug | null>>()
+const groupMemoryUpdateLocks = new Map<string, Promise<void>>()
 
 export function activeUpcomingPlans(plans: PlanItem[], now: Date): PlanItem[] {
   const todayKey = toDateKey(now)
@@ -114,7 +116,8 @@ function parsePlansField(raw: unknown, requireConfidence = false): ParsedPlan[] 
     const confidence = typeof confidenceRaw === 'number' ? confidenceRaw : Number(confidenceRaw)
     if (requireConfidence && (!Number.isFinite(confidence) || confidence < MEMORY_CONFIDENCE_THRESHOLD)) continue
     const normalizedConfidence = Number.isFinite(confidence) ? Math.max(0, Math.min(100, Math.round(confidence))) : 100
-    result.push({ text, date, confidence: normalizedConfidence })
+    result.push({ text: text.slice(0, 200), date, confidence: normalizedConfidence })
+    if (result.length >= MAX_UPCOMING_PLANS) break
   }
   return result
 }
@@ -226,9 +229,9 @@ function parseMemoryResponse(raw: string): MemoryUpdateResult | null {
       const relationshipConfidence =
         typeof parsed.relationshipConfidence === 'number' ? parsed.relationshipConfidence : Number(parsed.relationshipConfidence)
       return {
-        facts: parsed.facts.trim(),
+        facts: parsed.facts.trim().slice(0, 800),
         factConfidence: Number.isFinite(factConfidence) ? Math.max(0, Math.min(100, Math.round(factConfidence))) : 0,
-        style: parsed.style.trim(),
+        style: parsed.style.trim().slice(0, 300),
         styleConfidence: Number.isFinite(styleConfidence) ? Math.max(0, Math.min(100, Math.round(styleConfidence))) : 0,
         plans: parsePlansField(parsed.plans, true),
         warmthDelta: 0,
@@ -468,12 +471,29 @@ export async function maybeUpdateMemory(
   settings: AppSettings,
   logicContextText?: string,
 ): Promise<MemoryUpdateDebug | null> {
+  const running = memoryUpdateLocks.get(contactId)
+  if (running) return running
+  const task = updateMemory(contactId, conversationId, settings, logicContextText)
+  memoryUpdateLocks.set(contactId, task)
+  try {
+    return await task
+  } finally {
+    if (memoryUpdateLocks.get(contactId) === task) memoryUpdateLocks.delete(contactId)
+  }
+}
+
+async function updateMemory(
+  contactId: string,
+  conversationId: string,
+  settings: AppSettings,
+  logicContextText?: string,
+): Promise<MemoryUpdateDebug | null> {
   try {
     const contact = await db.contacts.get(contactId)
     if (!contact) return null
 
     const allMessages = await db.messages.where('conversationId').equals(conversationId).sortBy('createdAt')
-    const cursor = contact.memoryMessageCursor ?? 0
+    const cursor = Math.max(0, Math.min(contact.memoryMessageCursor ?? 0, allMessages.length))
     const newMessages = allMessages.slice(cursor)
     if (newMessages.length < MEMORY_UPDATE_INTERVAL) return null
 
@@ -584,6 +604,7 @@ export async function recentMemoriesTextByScope(
     const include = opts.includeScopes ? new Set(opts.includeScopes) : null
     const exclude = opts.excludeScopes ? new Set(opts.excludeScopes) : null
     items = items.filter((item) => {
+      if (item.status && item.status !== 'active') return false
       const scope = item.scope ?? 'private'
       if (include && !include.has(scope)) return false
       if (exclude && exclude.has(scope)) return false
@@ -592,11 +613,12 @@ export async function recentMemoriesTextByScope(
     if (items.length === 0) return ''
 
     // Composite score: importance (60%) + recency (40%).
-    const maxAge = Math.max(1, now - (items[0]?.createdAt ?? now))
+    const oldestTimestamp = Math.min(...items.map((item) => item.updatedAt || item.createdAt))
+    const maxAge = Math.max(1, now - oldestTimestamp)
     const scored = items.map((item) => {
-      const age = now - item.createdAt
+      const age = now - (item.updatedAt || item.createdAt)
       const recency = Math.max(0, 1 - age / (maxAge || 1))
-      const score = item.importance * 0.6 + recency * 0.4
+      const score = item.pinned ? 2 : item.importance * 0.6 + recency * 0.4
       return { item, score }
     })
     scored.sort((a, b) => b.score - a.score)
@@ -851,12 +873,30 @@ export async function maybeUpdateGroupMemory(
   settings: AppSettings,
   logicContextText?: string,
 ): Promise<void> {
+  const running = groupMemoryUpdateLocks.get(groupId)
+  if (running) return running
+  const task = updateGroupMemory(groupId, conversationId, members, settings, logicContextText)
+  groupMemoryUpdateLocks.set(groupId, task)
+  try {
+    await task
+  } finally {
+    if (groupMemoryUpdateLocks.get(groupId) === task) groupMemoryUpdateLocks.delete(groupId)
+  }
+}
+
+async function updateGroupMemory(
+  groupId: string,
+  conversationId: string,
+  members: Contact[],
+  settings: AppSettings,
+  logicContextText?: string,
+): Promise<void> {
   try {
     const group = await db.groups.get(groupId)
     if (!group) return
 
     const allMessages = await db.messages.where('conversationId').equals(conversationId).sortBy('createdAt')
-    const cursor = group.memoryMessageCursor ?? 0
+    const cursor = Math.max(0, Math.min(group.memoryMessageCursor ?? 0, allMessages.length))
     const newMessages = allMessages.slice(cursor)
     if (newMessages.length < MEMORY_UPDATE_INTERVAL) return
 
@@ -910,10 +950,7 @@ export async function maybeUpdateGroupMemory(
     })
 
     const updates = parseGroupMemoryResponse(raw, targets.length)
-    if (!updates) {
-      await db.groups.update(groupId, { memoryMessageCursor: allMessages.length })
-      return
-    }
+    if (!updates) return
 
     const now = Date.now()
     const memberByName = new Map(members.map((member) => [displayName(member), member]))

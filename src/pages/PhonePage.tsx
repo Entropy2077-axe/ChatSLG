@@ -2,7 +2,7 @@ import { useMemo, useState } from 'react'
 import { useLiveQuery } from 'dexie-react-hooks'
 import { useNavigate } from 'react-router-dom'
 import { db } from '../db/db'
-import { unreadCountFor } from '../lib/unread'
+import { totalUnreadForConversations } from '../lib/conversationStats'
 import { momentsUnreadCount } from '../lib/momentsUnread'
 import { checkForUpdate } from '../lib/updateCheck'
 import { useSettingsStore } from '../store/useSettingsStore'
@@ -17,10 +17,9 @@ export function PhonePage() {
   const momentsLastReadAt = useSettingsStore((state) => state.momentsLastReadAt)
   const [updateText, setUpdateText] = useState('')
   const conversations = useLiveQuery(() => db.conversations.filter((c) => c.channel === 'private_phone' || c.channel === 'group_phone' || (!c.channel && !!(c.contactId || c.groupId))).toArray(), []) ?? EMPTY
-  const messages = useLiveQuery(() => db.messages.toArray(), []) ?? EMPTY
   const moments = useLiveQuery(() => db.moments.toArray(), []) ?? EMPTY
   const socialEvents = useLiveQuery(() => db.socialEvents.toArray(), []) ?? EMPTY
-  const messageUnread = useMemo(() => conversations.reduce((sum, c) => sum + unreadCountFor(c.lastReadAt, messages.filter((m) => m.conversationId === c.id)), 0), [conversations, messages])
+  const messageUnread = useLiveQuery(() => totalUnreadForConversations(conversations), [conversations]) ?? 0
   const momentUnread = useMemo(() => momentsUnreadCount({ lastReadAt: momentsLastReadAt, moments, socialEvents }), [momentsLastReadAt, moments, socialEvents])
 
   async function update() {

@@ -88,6 +88,67 @@ function tryParseJson(trimmedRaw: string): ParsedAiTurn | null {
   return { bubbles, knowledgeQueries: [], mood, thought, outfitChange }
 }
 
+function parseFinanceMarker(line: string): AiBubble | null {
+  let match = line.match(/^\[transfer:(\d+):([^\]]+)\]$/i)
+  if (match) return { type: 'transfer', amount: Number(match[1]), note: match[2].trim().slice(0, 80) }
+  match = line.match(/^\[redPacket:(\d+):([^\]]+)\]$/i)
+  if (match) return { type: 'redPacket', amount: Number(match[1]), note: match[2].trim().slice(0, 80) }
+  match = line.match(/^\[loanRequest:(\d+):([^\]]+)\]$/i)
+  if (match) return { type: 'loanRequest', amount: Number(match[1]), note: match[2].trim().slice(0, 80) }
+  match = line.match(/^\[loanDecision:([^:\]]+):(accept|reject):(\d+)\]$/i)
+  if (match) return { type: 'loanDecision', loanId: match[1].trim(), decision: match[2].toLowerCase() as 'accept' | 'reject', amount: Number(match[3]) }
+  match = line.match(/^\[giftPurchase:(\d+):([^:\]]+):([^:\]]+):([^\]]+)\]$/i)
+  if (match) return { type: 'giftPurchase', amount: Number(match[1]), name: match[2].trim().slice(0, 30), icon: match[3].trim().slice(0, 8), description: match[4].trim().slice(0, 80) }
+  return null
+}
+
+/** Fast path for the main model's plain-text draft. Ordinary chat and finance
+ * markers can be parsed locally, preserving the main model's wording and
+ * avoiding a second paid model call whose only job was mechanical JSON. */
+export function parseRawPrivateDraft(raw: string, fallbackMood: string = '😌'): ParsedAiTurn {
+  const moodMatch = raw.match(/<mood>\s*([^<]+?)\s*<\/mood>/i)
+  const thoughtMatch = raw.match(/<thought>\s*([\s\S]*?)\s*<\/thought>/i)
+  const body = raw
+    .replace(/<mood>[\s\S]*?<\/mood>/gi, '')
+    .replace(/<thought>[\s\S]*?<\/thought>/gi, '')
+    .trim()
+  const bubbles: AiBubble[] = []
+  for (const sourceLine of body.split(/\r?\n/)) {
+    let line = sourceLine.trim().replace(/^[-•]\s*/, '')
+    if (!line) continue
+    if ((line.startsWith('“') && line.endsWith('”')) || (line.startsWith('"') && line.endsWith('"'))) {
+      line = line.slice(1, -1).trim()
+    }
+    if (!line) continue
+    const finance = parseFinanceMarker(line)
+    if (finance) bubbles.push(finance)
+    else bubbles.push({ type: 'text', content: line })
+  }
+  return {
+    bubbles,
+    knowledgeQueries: [],
+    mood: normalizeMood(moodMatch?.[1], normalizeMood(fallbackMood)),
+    thought: thoughtMatch?.[1]?.trim().slice(0, 100),
+  }
+}
+
+export function rawPrivateDraftNeedsUtility(raw: string, latestUserText: string): boolean {
+  if (!/<mood>[\s\S]*?<\/mood>/i.test(raw) || !/<thought>[\s\S]*?<\/thought>/i.test(raw)) return true
+  const text = `${latestUserText}\n${raw}`
+  const scheduleIntent = /(约|见面|碰面|一起去|一起吃|改期|日程|安排|明天|后天|周[一二三四五六日天]|几点|上午|下午|晚上|今晚)/.test(text)
+  const outfitIntent = /(穿上|脱下|换上|换掉|衣服|外套|裤子|裙子|鞋子|帽子|围巾|配饰)/.test(text)
+  return scheduleIntent || outfitIntent
+}
+
+export function serializePrivateTurn(parsed: ParsedAiTurn): string {
+  return JSON.stringify({
+    messages: parsed.bubbles,
+    mood: parsed.mood,
+    thought: parsed.thought,
+    ...(parsed.outfitChange ? { outfitChange: parsed.outfitChange } : {}),
+  })
+}
+
 export function parseOutfitChange(raw: unknown): OutfitChangeProposal | undefined {
   if (!raw || typeof raw !== 'object') return undefined
   const value = raw as Record<string, unknown>, patch: Record<string, string> = {}

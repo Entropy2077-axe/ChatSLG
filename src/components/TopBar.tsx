@@ -4,12 +4,13 @@ import type { ReactNode } from 'react'
 interface TopBarProps {
   title: string
   showBack?: boolean
+  onBack?: () => void
   showSearch?: boolean
   onSearchClick?: () => void
   right?: ReactNode
 }
 
-export function TopBar({ title, showBack, showSearch, onSearchClick, right }: TopBarProps) {
+export function TopBar({ title, showBack, onBack, showSearch, onSearchClick, right }: TopBarProps) {
   const navigate = useNavigate()
   const canExit = showBack || title === '确认角色'
   return (
@@ -17,7 +18,7 @@ export function TopBar({ title, showBack, showSearch, onSearchClick, right }: To
       <div className="flex w-14 items-center">
         {canExit && (
           <button
-            onClick={() => navigate(-1)}
+            onClick={onBack ?? (() => navigate(-1))}
             aria-label="返回"
             className="flex h-9 w-9 items-center justify-center text-gray-700"
           >

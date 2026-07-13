@@ -2,7 +2,7 @@ import type { LocationMapBinding, TerrainType, WorldMapRecord } from '../types'
 
 export const MAP_SIZE = 32 as const
 export const MAP_GENERATOR_VERSION = 1
-export const PLACEMENT_VERSION = 2
+export const PLACEMENT_VERSION = 3
 export const MIN_BUILDING_CHEBYSHEV_DISTANCE = 3
 
 export const TERRAIN_COLORS: Record<TerrainType, string> = {

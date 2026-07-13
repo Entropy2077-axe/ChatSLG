@@ -1,7 +1,7 @@
 import { db } from '../db/db'
 import type { AcousticEdge, LocationNode, WorldMapRecord } from '../types'
 import { createWorldMap, placeBuildings, terrainAt } from './worldMap'
-import { DEFAULT_ACOUSTIC_EDGES, DEFAULT_LOCATIONS, DEFAULT_WORLD_MAP } from './world'
+import { DEFAULT_ACOUSTIC_EDGES, DEFAULT_BUILDING_SPECS, DEFAULT_LOCATIONS, DEFAULT_WORLD_MAP } from './world'
 import { chatCompletion } from './deepseek'
 import { extractJsonObject } from './aiProtocol'
 import { validateLocationExpansion } from './locationExpansion'
@@ -11,12 +11,7 @@ export interface NewWorldDraft { map: WorldMapRecord; locations: LocationNode[];
 
 function clonedLocations(worldId: string, map: WorldMapRecord): LocationNode[] {
   const now = Date.now()
-  const placements = placeBuildings(map, [
-    { id: 'home', allowedTerrains: ['urban', 'rural'], buildingCategory: 'residence' },
-    { id: 'school', allowedTerrains: ['urban'], buildingCategory: 'school' },
-    { id: 'mall', allowedTerrains: ['urban'], buildingCategory: 'mall' },
-    { id: 'hospital', allowedTerrains: ['urban'], buildingCategory: 'hospital' },
-  ])
+  const placements = placeBuildings(map, DEFAULT_BUILDING_SPECS)
   return DEFAULT_LOCATIONS.map((item) => ({ ...item, worldId, mapBinding: placements.get(item.id), createdAt: now, updatedAt: now }))
 }
 

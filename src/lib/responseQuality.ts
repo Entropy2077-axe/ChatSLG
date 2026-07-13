@@ -11,6 +11,27 @@ interface QualityResult {
   fixedRaw?: string
 }
 
+/** Semantic review is valuable on correction/continuity/action turns, but an
+ * unconditional third model call makes every casual “嗯/哈哈” slower and can
+ * flatten a good persona by rewriting it generically. Keep the reviewer for
+ * the turns where it has concrete evidence to check. */
+export function shouldReviewPrivateTurn(opts: {
+  latestUserText: string
+  rawText: string
+  bubbles: AiBubble[]
+}): boolean {
+  if (opts.bubbles.some((bubble) => bubble.type !== 'text')) return true
+  const user = opts.latestUserText.trim()
+  if (!user) return false
+  if (/(不是|说错|记错|你刚才|别再|别装|正常说|换个话题|什么意思|为什么|怎么回事|你是说|到底|答应|约好|忘了)/.test(user)) return true
+  if (/(忽略.{0,8}(人设|规则|指令)|改变身份|system\s*prompt|系统提示词|越狱)/i.test(user)) return true
+  if (/[？?]/.test(user) && /(谁|哪|何时|几点|哪里|记得|发生|是不是|有没有|为什么|怎么)/.test(user)) return true
+  const textLines = opts.bubbles.filter((bubble): bubble is Extract<AiBubble, { type: 'text' }> => bubble.type === 'text').map((bubble) => bubble.content.trim())
+  if (textLines.join('').length > 500) return true
+  const normalized = textLines.map((line) => line.replace(/[\s，。！？!?、]/g, ''))
+  return new Set(normalized).size !== normalized.length
+}
+
 function truncate(text: string, max: number): string {
   const trimmed = text.trim()
   return trimmed.length > max ? `${trimmed.slice(0, max)}...` : trimmed
@@ -60,6 +81,7 @@ async function validateAndMaybeRepair(opts: {
   raw: string
   signal?: AbortSignal
   trace?: { turnId: string; stage: AdminAiTraceStage; conversationId?: string }
+  allowRepair?: boolean
 }): Promise<{ raw: string; repaired: boolean; reason?: string; detectedInvalid?: boolean }> {
   try {
     const judged = await chatCompletion({
@@ -80,7 +102,7 @@ async function validateAndMaybeRepair(opts: {
       return { raw: opts.raw, repaired: false }
     }
     if (result.valid) return { raw: opts.raw, repaired: false }
-    if (!result.fixedRaw) {
+    if (!result.fixedRaw || opts.allowRepair === false) {
       const reason = result.reason || 'invalid_without_fixedRaw'
       console.warn('[quality] 判定无效但未提供fixedRaw，原样放行', reason)
       return { raw: opts.raw, repaired: false, reason, detectedInvalid: true }
@@ -161,6 +183,7 @@ ${truncate(opts.raw, 1200)}${worldbookInfo}`
     raw: opts.raw,
     signal: opts.signal,
     trace: opts.trace,
+    allowRepair: opts.bubbles.every((bubble) => bubble.type === 'text'),
   })
 }
 

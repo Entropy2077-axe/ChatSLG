@@ -176,7 +176,7 @@ export function MomentsPage() {
   }
 
   return (
-    <div className="relative flex h-[var(--app-height)] flex-col overflow-hidden bg-[#ededed]">
+    <div className="relative flex h-full min-h-0 flex-col overflow-hidden bg-[#ededed]">
       <TopBar
         title="朋友圈"
         showBack
@@ -310,7 +310,7 @@ export function MomentsPage() {
                           value={commentDraft}
                           onChange={(e) => setCommentDraft(e.target.value)}
                           onKeyDown={(e) => {
-                            if (e.key === 'Enter') submitComment(m.id, poster?.id)
+                            if (e.key === 'Enter' && !e.nativeEvent.isComposing) submitComment(m.id, poster?.id)
                           }}
                           placeholder={replyTarget ? `回复${replyTarget.authorLabel}：` : '说点什么…'}
                           autoFocus

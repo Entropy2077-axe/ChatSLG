@@ -33,15 +33,23 @@ import { useSettingsStore } from './store/useSettingsStore'
 // .app-shell itself (short-circuits the var() lookup chain entirely for
 // the one element that matters most for this bug), and force a synchronous
 // reflow right after so a stale layout can't linger.
-function syncAppHeight() {
-  const height = window.visualViewport?.height ?? window.innerHeight
+let cachedSafeTop: number | null = null
+let syncFrame = 0
+
+function readSafeTop() {
+  if (cachedSafeTop !== null) return cachedSafeTop
   const probe = document.createElement('div')
   probe.style.cssText = 'position:fixed;visibility:hidden;padding-top:env(safe-area-inset-top,0px)'
   document.body.appendChild(probe)
-  const safeTop = Number.parseFloat(getComputedStyle(probe).paddingTop) || 0
+  cachedSafeTop = Number.parseFloat(getComputedStyle(probe).paddingTop) || 0
   probe.remove()
+  return cachedSafeTop
+}
+
+function syncAppHeight() {
+  const height = window.visualViewport?.height ?? window.innerHeight
   const manualTop = Math.max(0, Math.min(80, useSettingsStore.getState().topInsetAdjustmentPx || 0))
-  const top = safeTop + manualTop
+  const top = readSafeTop() + manualTop
   const appHeight = Math.max(240, height - top)
   document.documentElement.style.setProperty('--app-top-offset', `${top}px`)
   document.documentElement.style.setProperty('--app-height', `${appHeight}px`)
@@ -52,12 +60,23 @@ function syncAppHeight() {
   }
   void document.body.offsetHeight // force a reflow, in case the property change alone doesn't trigger one
 }
+
+function requestHeightSync() {
+  if (syncFrame) return
+  syncFrame = requestAnimationFrame(() => {
+    syncFrame = 0
+    syncAppHeight()
+  })
+}
 syncAppHeight()
-window.addEventListener('resize', syncAppHeight)
-window.addEventListener('orientationchange', syncAppHeight)
-window.visualViewport?.addEventListener('resize', syncAppHeight)
+window.addEventListener('resize', requestHeightSync)
+window.addEventListener('orientationchange', () => {
+  cachedSafeTop = null
+  requestHeightSync()
+})
+window.visualViewport?.addEventListener('resize', requestHeightSync)
 useSettingsStore.subscribe((state, previous) => {
-  if (state.topInsetAdjustmentPx !== previous.topInsetAdjustmentPx) syncAppHeight()
+  if (state.topInsetAdjustmentPx !== previous.topInsetAdjustmentPx) requestHeightSync()
 })
 
 createRoot(document.getElementById('root')!).render(

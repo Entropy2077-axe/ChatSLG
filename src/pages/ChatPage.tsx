@@ -105,6 +105,12 @@ export function ChatPage({ conversationIdOverride, embedded = false }: { convers
   const isPageMounted = useRef(true)
   const currentConversationRef = useRef<string | undefined>(conversationId)
 
+  useEffect(() => {
+    if (!toast) return
+    const timeout = window.setTimeout(() => setToast(''), 1800)
+    return () => window.clearTimeout(timeout)
+  }, [toast])
+
   const scrollContainerRef = useRef<HTMLDivElement>(null)
   const bubbleRefs = useRef<Map<string, HTMLDivElement>>(new Map())
   const [flashId, setFlashId] = useState<string | null>(highlightId)
@@ -499,7 +505,7 @@ export function ChatPage({ conversationIdOverride, embedded = false }: { convers
 
       {error && <p className="bg-red-50 px-4 py-1.5 text-xs text-red-500">{error}</p>}
       {toast && (
-        <p className="bg-gray-100 px-4 py-1.5 text-center text-xs text-gray-500" onAnimationEnd={() => setToast('')}>
+        <p className="bg-gray-100 px-4 py-1.5 text-center text-xs text-gray-500">
           {toast}
         </p>
       )}
@@ -553,7 +559,7 @@ export function ChatPage({ conversationIdOverride, embedded = false }: { convers
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
                 onKeyDown={(e) => {
-                  if (e.key === 'Enter' && !e.shiftKey) {
+                  if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
                     e.preventDefault()
                     handleSend()
                   }

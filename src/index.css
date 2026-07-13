@@ -40,9 +40,54 @@
   --color-red-500: #ef4444;
   --color-red-600: #dc2626;
   --color-amber-600: #d97706;
+  --color-amber-50: #fffbeb;
+  --color-amber-200: #fde68a;
+  --color-amber-500: #f59e0b;
+  --color-amber-700: #b45309;
+  --color-amber-800: #92400e;
   --color-yellow-50: #fefce8;
+  --color-blue-50: #eff6ff;
+  --color-blue-200: #bfdbfe;
+  --color-blue-500: #3b82f6;
   --color-green-600: #16a34a;
+  --color-green-50: #f0fdf4;
+  --color-green-100: #dcfce7;
+  --color-green-500: #22c55e;
+  --color-green-700: #15803d;
   --color-blue-600: #2563eb;
+  --color-cyan-500: #06b6d4;
+  --color-emerald-50: #ecfdf5;
+  --color-emerald-100: #d1fae5;
+  --color-emerald-500: #10b981;
+  --color-indigo-500: #6366f1;
+  --color-orange-50: #fff7ed;
+  --color-orange-200: #fed7aa;
+  --color-orange-400: #fb923c;
+  --color-orange-500: #f97316;
+  --color-orange-600: #ea580c;
+  --color-pink-50: #fdf2f8;
+  --color-pink-500: #ec4899;
+  --color-pink-600: #db2777;
+  --color-purple-50: #faf5ff;
+  --color-purple-200: #e9d5ff;
+  --color-purple-600: #9333ea;
+  --color-red-100: #fee2e2;
+  --color-rose-500: #f43f5e;
+  --color-sky-500: #0ea5e9;
+  --color-slate-100: #f1f5f9;
+  --color-slate-200: #e2e8f0;
+  --color-slate-500: #64748b;
+  --color-slate-600: #475569;
+  --color-slate-700: #334155;
+  --color-slate-800: #1e293b;
+  --color-teal-600: #0d9488;
+  --color-violet-50: #f5f3ff;
+  --color-violet-100: #ede9fe;
+  --color-violet-200: #ddd6fe;
+  --color-violet-500: #8b5cf6;
+  --color-violet-600: #7c3aed;
+  --color-violet-700: #6d28d9;
+  --color-zinc-600: #52525b;
 }
 
 :root {
@@ -104,6 +149,11 @@ button {
 
 button:active:not(:disabled) {
   transform: scale(.96);
+}
+
+:where(button, a, input, textarea, select):focus-visible {
+  outline: 2px solid #2563eb;
+  outline-offset: 2px;
 }
 
 html,
@@ -168,7 +218,7 @@ body {
 }
 
 .theme-dark .text-white {
-  color: #111827 !important;
+  color: #ffffff !important;
 }
 
 .theme-dark .text-gray-900,
@@ -221,4 +271,25 @@ body {
 ::-webkit-scrollbar {
   width: 0;
   height: 0;
+}
+
+/* Tailwind v4 emits the individual `translate` property, unsupported by
+   Chromium 99. Keep transforms visible on older Android WebViews. */
+@supports not (translate: 1px) {
+  .-translate-x-1\/2 { transform: translateX(-50%); }
+  .-translate-y-1\/2 { transform: translateY(-50%); }
+  .-translate-x-1\/2.-translate-y-1\/2 { transform: translate(-50%, -50%); }
+  .translate-x-0 { transform: translateX(0); }
+  .translate-x-1 { transform: translateX(.25rem); }
+  .translate-x-5 { transform: translateX(1.25rem); }
+  .translate-x-6 { transform: translateX(1.5rem); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }

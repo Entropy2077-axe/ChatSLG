@@ -6,7 +6,7 @@ import { describeCurrentSchedule } from './schedule'
 import { isModuleEnabled } from '../features'
 import type { Contact, GroupAiBubble, GroupAiResponse, GroupEnergyLevel, GroupSpeakerLimit, OutfitChangeProposal } from '../types'
 import { dynamicRelationScore } from './contactRelations'
-import { normalizeMood } from './mood'
+import { MOOD_EMOJIS, normalizeMood } from './mood'
 
 /** Group chats can cap how many members answer per turn; see pickSpeakers. */
 const DEFAULT_GROUP_SPEAKER_LIMIT: GroupSpeakerLimit = 3
@@ -263,7 +263,7 @@ ${samplesText ? `- 说话样例:\n${samplesText}` : ''}`
 - 先在心里决定“谁说几句、谁接谁的话”，但不要把计划输出。
 - 本轮发言人只能来自: ${speakerNames}。
   - 被@或被回复的人先处理；其他人不要机械排队答题，也不必每个被选中的人都说话。
-- ${opts.allowAiChatter === false ? 'AI互聊关闭：所有发言都围绕用户、用户@/回复对象或用户相关话题。' : opts.speakers.length >= 2 ? 'AI互聊开启：至少安排一次AI之间的接话/回应/吐槽/附和/反驳/点名，不能只是每个人各自回答用户。' : '本轮只有一位AI发言人：不要求AI之间互动。'}
+- ${opts.allowAiChatter === false ? 'AI互聊关闭：所有发言都围绕用户、用户@/回复对象或用户相关话题。' : opts.speakers.length >= 2 ? 'AI互聊开启：只有出现自然接点时才让成员互相接话；不要为了证明是群聊而硬凑互动。' : '本轮只有一位AI发言人：不要求AI之间互动。'}
 - ${
     opts.energyLevel === 'cold'
       ? '冷淡：整轮总共1到3句。'
@@ -328,32 +328,19 @@ ${energyRule}
 <人名>（想法）[心情]“消息内容”
 
 示例:
-<林夏>（他刚才明显是在逗我，我想顺着怼一句）[好笑]“你这话说得也太像临时抱佛脚了吧。”
-<周屿>（我不想太热闹，但这个点我可以补一句）[平静]“不过真要赶的话，先把最容易错的地方过一遍。”
+<${opts.speakers[0]?.name ?? '发言人'}>（他刚才明显是在逗我，我想顺着接一句）[😊]“你这话也太像临时抱佛脚了吧。”
+${opts.speakers[1] ? `<${opts.speakers[1].name}>（我不想太热闹，但可以补一句）[😌]“真要赶的话，先过最容易错的地方。”` : ''}
 
 规则:
 - 人名必须来自本轮发言人: ${speakerNames}。
 - 每一行都必须有（想法）和[心情]，不能省略。
 - 第一行必须直接从 <人名> 开始，不要写“好的”“下面是”“草稿:”等任何前缀。
 - 想法是角色内心动机，短一点，不能出现在消息内容里。
-- 心情5字以内，不能空。
+- 心情只能填一个上面允许的 emoji，不能空。
 - 消息内容只写群里真正发出的文字，不要带人名冒号、括号、方括号。
 
-【最终强制检查 - 最高优先级】
-输出前逐条自查，任何一条不满足都必须重写草稿:
-1. ${formatContract.replace(/\n/g, '\n   ')}
-2. ${interactionContract.replace(/\n/g, '\n   ')}
-3. ${topicContract.replace(/\n/g, '\n   ')}
-4. ${opts.allowAiChatter === false ? 'AI互聊关闭：所有发言都围绕用户或用户相关话题，不发展AI之间的旁支闲聊。' : opts.speakers.length >= 2 ? 'AI互聊开启：有自然接点时可以互相接话，不要强行制造互动。' : '本轮只有一位AI发言人，不要求AI之间互动。'}
-5. ${
-    opts.energyLevel === 'cold'
-      ? '冷淡：整轮总共1到3句。'
-      : opts.energyLevel === 'lively'
-        ? '热闹：整轮总共6到12句，并允许同一人多次插入。'
-        : '普通：整轮总共3到7句。'
-  }
-6. 发言顺序不必按发言人编号轮流，可以 1 -> 2 -> 1 -> 3 这样自然插话。
-7. 只输出群聊纯文本草稿，不输出JSON。`
+【输出前检查】
+只检查三件事：每行格式完整且心情为允许的 emoji；人名只来自本轮发言人；互动与条数符合上面的唯一规则。只输出草稿，不解释。`
 }
 
 /**
@@ -455,6 +442,68 @@ export interface ParsedGroupTurn {
   groupVibe: string
   planCandidates: Array<{ title: string; summary: string; participantIndexes: number[]; location?: string }>
   outfitChanges: OutfitChangeProposal[]
+}
+
+export interface ParsedGroupRawDraft extends ParsedGroupTurn {
+  valid: boolean
+  reason?: string
+}
+
+/** Deterministically parses the strict line protocol emitted by the main group
+ * model. This replaces two mechanical model calls on the normal path while
+ * keeping the exact text, thought and mood chosen by each persona. */
+export function parseGroupRawDraft(raw: string, speakers: Contact[]): ParsedGroupRawDraft {
+  const empty: ParsedGroupRawDraft = {
+    valid: false,
+    reason: '草稿为空',
+    bubbles: [],
+    knowledgeQueries: [],
+    turnSummary: '',
+    groupVibe: '',
+    planCandidates: [],
+    outfitChanges: [],
+  }
+  if (!raw.trim() || speakers.length === 0) return empty
+  const speakerIndexByName = new Map(speakers.map((speaker, index) => [speaker.name, index + 1]))
+  const bubbles: GroupAiBubble[] = []
+  const lines = raw.split(/\r?\n/).map((line) => line.trim()).filter(Boolean)
+  for (const [index, line] of lines.entries()) {
+    const match = line.match(/^<([^>]+)>（([^）]+)）\[([^\]]+)]“([\s\S]+)”[。.]?$/)
+    if (!match) return { ...empty, reason: `第${index + 1}行格式不完整` }
+    const speakerIndex = speakerIndexByName.get(match[1].trim())
+    if (!speakerIndex) return { ...empty, reason: `第${index + 1}行使用了非本轮发言人` }
+    const moodText = match[3].trim()
+    if (!MOOD_EMOJIS.some((emoji) => moodText.includes(emoji))) {
+      return { ...empty, reason: `第${index + 1}行心情不是允许的emoji` }
+    }
+    bubbles.push({
+      speakerIndex,
+      speakerName: speakers[speakerIndex - 1].name,
+      type: 'text',
+      content: match[4].trim(),
+      thought: match[2].trim().slice(0, 100),
+      mood: normalizeMood(moodText),
+    })
+  }
+  return {
+    valid: bubbles.length > 0,
+    bubbles,
+    knowledgeQueries: [],
+    turnSummary: bubbles.map((bubble) => `${bubble.speakerName}：${bubble.content}`).join('；').slice(0, 180),
+    groupVibe: '',
+    planCandidates: [],
+    outfitChanges: [],
+  }
+}
+
+export function serializeGroupTurn(parsed: ParsedGroupTurn): string {
+  return JSON.stringify({
+    messages: parsed.bubbles,
+    turnSummary: parsed.turnSummary,
+    groupVibe: parsed.groupVibe,
+    outfitChanges: parsed.outfitChanges,
+    planCandidates: parsed.planCandidates,
+  })
 }
 
 export function parseGroupAiResponse(raw: string, speakerCount: number): ParsedGroupTurn {

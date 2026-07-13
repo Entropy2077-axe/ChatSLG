@@ -9,6 +9,7 @@ import { displayName } from '../lib/contact'
 import { createStrawmanContact } from '../lib/strawman'
 import { useSettingsStore } from '../store/useSettingsStore'
 import { useContactCreationStore } from '../store/useContactCreationStore'
+import { retryContactCreation } from '../lib/contactCreationQueue'
 
 const EMPTY_ARRAY: never[] = []
 
@@ -19,9 +20,8 @@ export function ContactsPage() {
   const [strawmanSourceId, setStrawmanSourceId] = useState<string | null>(null)
   const navigate = useNavigate()
   const adminModeEnabled = useSettingsStore((s) => s.adminModeEnabled)
-  const creationGenerating = useContactCreationStore((s) => s.generating)
-  const creationDraft = useContactCreationStore((s) => s.creationDraft)
-  const creationError = useContactCreationStore((s) => s.error)
+  const creationJobs = useContactCreationStore((s) => s.jobs)
+  const removeCreationJob = useContactCreationStore((s) => s.removeJob)
   const contactsRaw = useLiveQuery(() => db.contacts.toArray(), []) ?? EMPTY_ARRAY
   const contacts = useMemo(
     () => [...contactsRaw].sort((a, b) => displayName(a).localeCompare(displayName(b), 'zh')),
@@ -43,15 +43,16 @@ export function ContactsPage() {
   }
 
   return (
-    <div className="relative flex min-h-full flex-col">
+    <div className="relative flex h-[var(--app-height)] flex-col overflow-hidden">
       <TopBar
         title="联系人"
         showBack
+        onBack={() => navigate('/phone', { replace: true })}
         showSearch
         onSearchClick={() => setSearching(true)}
         right={
           <button
-            onClick={() => navigate('/contact/new')}
+            onClick={() => navigate('/contact/new', { state: { returnToContacts: true } })}
             aria-label="添加联系人"
             className="flex h-9 w-9 items-center justify-center text-gray-700"
           >
@@ -62,19 +63,30 @@ export function ContactsPage() {
         }
       />
 
-      <div className="flex-1">
-        {(creationGenerating || creationDraft || creationError) && (
-          <button onClick={() => navigate('/contact/new')} className={`flex w-full items-center gap-3 border-b px-4 py-3 text-left ${creationError ? 'border-red-100 bg-red-50' : creationDraft ? 'border-emerald-100 bg-emerald-50' : 'border-violet-100 bg-violet-50'}`}>
-            <span className="flex h-10 w-10 items-center justify-center rounded-xl bg-white text-xl shadow-sm">{creationError ? '⚠️' : creationDraft ? '✅' : '✨'}</span>
-            <div className="min-w-0 flex-1">
-              <p className="text-sm font-medium text-gray-900">{creationError ? '后台创建失败' : creationDraft ? '角色已生成，等待确认' : '正在后台创建角色'}</p>
-              <p className="mt-0.5 truncate text-xs text-gray-500">{creationError || (creationDraft ? `候选角色：${creationDraft.parsed.name}` : '可以继续使用其他功能，生成不会中断')}</p>
+      <div className="min-h-0 flex-1 overflow-y-auto">
+        {creationJobs.map((job, index) => {
+          const ready = job.status === 'ready'
+          const failed = job.status === 'failed'
+          const queued = job.status === 'queued'
+          const title = failed ? '后台创建失败' : ready ? '角色已生成，等待确认' : queued ? `等待创建（队列第 ${index + 1} 项）` : job.status === 'avatar' ? '正在匹配头像' : job.status === 'saving' ? '正在写入联系人' : '正在后台生成人设'
+          const detail = job.error || (ready && job.draft ? `候选角色：${job.draft.parsed.name}` : queued ? '前面的任务完成后会自动开始' : '离开此页面也不会中断')
+          return (
+            <div key={job.id} className={`flex w-full items-center gap-3 border-b px-4 py-3 ${failed ? 'border-red-100 bg-red-50' : ready ? 'border-emerald-100 bg-emerald-50' : 'border-violet-100 bg-violet-50'}`}>
+              <button type="button" aria-label={title} onClick={() => ready ? navigate(`/contact/new?job=${job.id}`, { state: { returnToContacts: true } }) : undefined} className="flex min-w-0 flex-1 items-center gap-3 text-left">
+                <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-white text-xl shadow-sm">{failed ? '⚠️' : ready ? '✅' : queued ? '⏳' : '✨'}</span>
+                <span className="min-w-0 flex-1">
+                  <span className="block text-sm font-medium text-gray-900">{title}</span>
+                  <span className="mt-0.5 block truncate text-xs text-gray-500">{detail}</span>
+                </span>
+              </button>
+              {failed ? <button type="button" onClick={() => retryContactCreation(job.id)} className="rounded-lg bg-white px-2.5 py-1.5 text-xs text-red-600 shadow-sm">重试</button> : null}
+              {(failed || queued) ? <button type="button" onClick={() => removeCreationJob(job.id)} className="px-1 text-lg text-gray-400" aria-label="移除任务">×</button> : null}
+              {ready ? <button type="button" onClick={() => navigate(`/contact/new?job=${job.id}`, { state: { returnToContacts: true } })} className="text-gray-400" aria-label="查看候选角色">›</button> : null}
             </div>
-            <span className="text-gray-400">›</span>
-          </button>
-        )}
+          )
+        })}
         <button
-          onClick={() => navigate('/contact/new')}
+          onClick={() => navigate('/contact/new', { state: { returnToContacts: true } })}
           className="flex w-full items-center gap-3 border-b border-gray-100 px-4 py-3 text-left active:bg-gray-50"
         >
           <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-[#aa3bff]/10 text-[#aa3bff]">

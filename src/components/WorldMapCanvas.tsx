@@ -4,7 +4,11 @@ import type { Contact, LocationNode, WorldMapRecord } from '../types'
 
 const CELL = 22
 const MAX_SCALE = 2.4
-const EMOJI: Record<string, string> = { residence: '🏠', school: '🏫', mall: '🏬', hospital: '🏥', park: '🌳', farm: '🚜', beach: '🏖️', custom: '📍' }
+const EMOJI: Record<string, string> = {
+  residence: '🏠', apartment: '🏢', school: '🏫', 'primary-school': '🎒', 'middle-school': '📚',
+  university: '🎓', mall: '🏬', hospital: '🏥', hotel: '🏨', bar: '🍸', park: '🌳', farm: '🚜',
+  scenic: '⛰️', 'beach-facility': '🏖️', 'river-facility': '🌉', beach: '🏖️', custom: '📍',
+}
 
 interface Viewport { width: number; height: number }
 interface Point { x: number; y: number }

@@ -22,18 +22,29 @@ export const TIME_SLOTS: Array<{ slot: TimeSlot; hour: 8 | 12 | 18 | 22; label: 
 
 const DEFAULT_WORLD_ID = 'default-modern-world'
 
-function node(id: string, parentId: string | undefined, name: string, kind: string, description: string, sortOrder: number): LocationNode {
+function node(id: string, parentId: string | undefined, name: string, kind: string, description: string, sortOrder: number, access: LocationNode['access'] = 'public'): LocationNode {
   const now = Date.now()
-  return { id, worldId: DEFAULT_WORLD_ID, parentId, name, kind, description, access: 'public', sortOrder, createdAt: now, updatedAt: now }
+  return { id, worldId: DEFAULT_WORLD_ID, parentId, name, kind, description, access, sortOrder, createdAt: now, updatedAt: now }
 }
+
+const APARTMENT_ROOMS = [203, 306, 408, 502, 607, 705, 809, 903, 1006, 1102, 1208, 1505]
+  .map((room, index) => node(
+    `apartment-room-${room}`,
+    'apartment',
+    `${room}室`,
+    'apartment-room',
+    `独立公寓住宅，位于${Math.floor(room / 100)}层。适合不与玩家同住的角色长期居住；除非人设明确合租，否则不要让其他角色共用此房间。`,
+    62 + index,
+    'private',
+  ))
 
 export const DEFAULT_LOCATIONS: LocationNode[] = [
   node('city', undefined, '城市', 'world', '当前世界的公共区域。', 0),
-  node('home', 'city', '住所', 'residence', '安静的共同住所，房间之间的声音传播有限。', 10),
-  node('home-living', 'home', '客厅', 'living-room', '住所的公共活动区域。', 11),
+  node('home', 'city', '玩家的家', 'residence', '玩家自己的私人住所。只有家人、伴侣、室友或人设明确与玩家同住的角色才适合长期住在这里，普通朋友和陌生人不能默认住入。', 10, 'private'),
+  node('home-living', 'home', '客厅', 'living-room', '玩家住所的公共活动区域，仅供确实与玩家同住或受邀来访的角色使用。', 11, 'private'),
   node('home-kitchen', 'home', '厨房', 'kitchen', '与客厅相连的开放式厨房。', 12),
   node('home-bedroom', 'home', '卧室', 'bedroom', '私密休息空间，隔门只能模糊听见客厅动静。', 13),
-  node('school', 'city', '学校', 'school', '拥有教室、走廊和食堂的校园。', 20),
+  node('school', 'city', '临江高中', 'high-school', '面向高中生的校园，拥有教室、走廊、食堂和操场。', 20, 'restricted'),
   node('school-classroom', 'school', '教室', 'classroom', '上课和自习的空间。', 21),
   node('school-corridor', 'school', '走廊', 'corridor', '连接教学区域的公共通道。', 22),
   node('school-canteen', 'school', '食堂', 'canteen', '学生和教职工用餐的公共区域。', 23),
@@ -46,15 +57,62 @@ export const DEFAULT_LOCATIONS: LocationNode[] = [
   node('hospital-lobby', 'hospital', '医院大厅', 'lobby', '患者与访客进出的公共大厅。', 41),
   node('hospital-clinic', 'hospital', '门诊室', 'clinic', '医生接诊和检查的房间。', 42),
   node('hospital-ward', 'hospital', '病房', 'ward', '住院休息和护理的安静区域。', 43),
+  node('apartment', 'city', '栖岸公寓', 'apartment', '面向城市居民的公寓楼，包含十二间分布在不同楼层的独立住宅。', 60, 'restricted'),
+  node('apartment-hallway', 'apartment', '公寓走廊', 'hallway', '连接电梯与各住户房门的公共走廊，只能模糊听见房间内有人交谈。', 61, 'restricted'),
+  ...APARTMENT_ROOMS,
+  node('bar', 'city', '夜航酒吧', 'bar', '夜间营业的城市酒吧，适合成年人聚会、演出和社交。', 80),
+  node('hotel', 'city', '云庭酒店', 'hotel', '接待旅客和临时住宿者的城市酒店，不应替代普通居民的长期住所。', 90),
+  node('hotel-lobby', 'hotel', '酒店大堂', 'hotel-lobby', '办理入住、等候和短暂会面的公共区域。', 91),
+  node('hotel-room', 'hotel', '客房', 'hotel-room', '供住客临时休息的标准客房。', 92, 'private'),
+  node('hotel-restaurant', 'hotel', '酒店餐厅', 'restaurant', '面向住客与访客开放的餐厅。', 93),
+  node('university', 'city', '东川大学', 'university', '拥有教学、研究和校园生活设施的综合大学。', 100),
+  node('university-classroom', 'university', '大学教室', 'classroom', '大学课程与讲座使用的教室。', 101),
+  node('university-library', 'university', '大学图书馆', 'library', '安静的学习、借阅和研究空间。', 102),
+  node('university-canteen', 'university', '大学食堂', 'canteen', '师生集中用餐的公共区域。', 103),
+  node('university-dorm', 'university', '大学宿舍', 'dormitory', '仅适合住校大学生长期居住的集体宿舍。', 104, 'restricted'),
+  node('primary-school', 'city', '青禾小学', 'primary-school', '面向小学生的基础教育校园。', 110, 'restricted'),
+  node('primary-classroom', 'primary-school', '小学教室', 'classroom', '小学生上课的教室。', 111, 'restricted'),
+  node('primary-playground', 'primary-school', '小学操场', 'playground', '课间活动和体育课使用的操场。', 112, 'restricted'),
+  node('middle-school', 'city', '明远初中', 'middle-school', '面向初中生的校园。', 120, 'restricted'),
+  node('middle-classroom', 'middle-school', '初中教室', 'classroom', '初中课程使用的教室。', 121, 'restricted'),
+  node('middle-playground', 'middle-school', '初中操场', 'playground', '体育课和课外活动区域。', 122, 'restricted'),
+  node('grass-park', 'city', '原野公园', 'grassland-park', '建在开阔草地区域的自然公园。', 130),
+  node('grass-park-lawn', 'grass-park', '中央草坪', 'lawn', '适合散步、野餐和户外活动的开阔草坪。', 131),
+  node('grass-park-camp', 'grass-park', '露营地', 'campground', '配有基础设施的草地露营区。', 132),
+  node('mountain-scenic', 'city', '雾岭景区', 'mountain-scenic', '位于山地区域的登山与观景设施。', 140),
+  node('mountain-trail', 'mountain-scenic', '登山步道', 'mountain-trail', '连接山脚与观景区域的步道。', 141),
+  node('mountain-lookout', 'mountain-scenic', '山顶观景台', 'lookout', '可以俯瞰城市和河流的山地观景设施。', 142),
+  node('beach-resort', 'city', '白沙湾', 'beach-facility', '位于沙滩区域的公共休闲设施。', 150),
+  node('beach-boardwalk', 'beach-resort', '海滨步道', 'boardwalk', '沿沙滩铺设的步行区域。', 151),
+  node('beach-shop', 'beach-resort', '海滨小店', 'beach-shop', '出售饮品和沙滩用品的小店。', 152),
+  node('river-park', 'city', '临河公园', 'river-facility', '依托河流区域建设的亲水公共空间。', 160),
+  node('river-pier', 'river-park', '河畔码头', 'pier', '靠近水面的停靠与观景平台。', 161),
+  node('river-walk', 'river-park', '滨河步道', 'river-walk', '沿河设置的步行和慢跑区域。', 162),
+  node('farm', 'city', '晴川农场', 'farm', '位于农村区域的生产与生活设施。', 170, 'restricted'),
+  node('farm-field', 'farm', '农田', 'farmland', '种植和农事活动区域。', 171, 'restricted'),
+  node('farm-house', 'farm', '农舍', 'farmhouse', '适合农场经营者及其家人居住的住宅。', 172, 'private'),
 ]
 
 export const DEFAULT_WORLD_MAP = createWorldMap('chatslg-fixed-modern-v1', 'fixed', DEFAULT_WORLD_ID)
-const DEFAULT_BINDINGS = placeBuildings(DEFAULT_WORLD_MAP, [
+export const DEFAULT_BUILDING_SPECS = [
   { id: 'home', allowedTerrains: ['urban', 'rural'], buildingCategory: 'residence' },
   { id: 'school', allowedTerrains: ['urban'], buildingCategory: 'school' },
   { id: 'mall', allowedTerrains: ['urban'], buildingCategory: 'mall' },
   { id: 'hospital', allowedTerrains: ['urban'], buildingCategory: 'hospital' },
-])
+  { id: 'apartment', allowedTerrains: ['urban'], buildingCategory: 'apartment' },
+  { id: 'bar', allowedTerrains: ['urban'], buildingCategory: 'bar' },
+  { id: 'hotel', allowedTerrains: ['urban'], buildingCategory: 'hotel' },
+  { id: 'university', allowedTerrains: ['urban'], buildingCategory: 'university' },
+  { id: 'primary-school', allowedTerrains: ['urban', 'rural'], buildingCategory: 'primary-school' },
+  { id: 'middle-school', allowedTerrains: ['urban', 'rural'], buildingCategory: 'middle-school' },
+  { id: 'grass-park', allowedTerrains: ['grassland'], buildingCategory: 'park' },
+  { id: 'mountain-scenic', allowedTerrains: ['mountain'], buildingCategory: 'scenic' },
+  { id: 'beach-resort', allowedTerrains: ['beach'], buildingCategory: 'beach-facility' },
+  { id: 'river-park', allowedTerrains: ['river'], buildingCategory: 'river-facility' },
+  { id: 'farm', allowedTerrains: ['rural'], buildingCategory: 'farm' },
+] satisfies Array<{ id: string; allowedTerrains: import('../types').TerrainType[]; buildingCategory: string }>
+
+const DEFAULT_BINDINGS = placeBuildings(DEFAULT_WORLD_MAP, DEFAULT_BUILDING_SPECS)
 for (const location of DEFAULT_LOCATIONS) {
   const binding = DEFAULT_BINDINGS.get(location.id)
   if (binding) location.mapBinding = binding
@@ -70,13 +128,35 @@ export const DEFAULT_ACOUSTIC_EDGES: AcousticEdge[] = [
   edge('school-classroom', 'school-corridor', 'muffled'),
   edge('mall-atrium', 'mall-cafe', 'muffled'),
   edge('mall-atrium', 'mall-shop', 'muffled'),
+  ...APARTMENT_ROOMS.map((room) => edge('apartment-hallway', room.id, 'muffled')),
+  edge('hotel-lobby', 'hotel-restaurant', 'clear'),
+  edge('university-classroom', 'university-library', 'muffled'),
+  edge('grass-park-lawn', 'grass-park-camp', 'muffled'),
+  edge('beach-boardwalk', 'beach-shop', 'clear'),
+  edge('river-pier', 'river-walk', 'clear'),
 ]
 
-export async function ensureWorldInitialized(): Promise<WorldState> {
+let worldInitializationPromise: Promise<void> | undefined
+
+async function initializeWorldStorage(): Promise<void> {
   const existing = await db.worldState.get('global')
   if (existing) {
     if (!(await db.worldMaps.get('active'))) await db.worldMaps.put({ ...DEFAULT_WORLD_MAP, worldId: existing.worldId, updatedAt: Date.now() })
-    const currentLocations = await db.locations.toArray()
+    let currentLocations = await db.locations.toArray()
+    if (existing.worldId === DEFAULT_WORLD_ID) {
+      const knownLocationIds = new Set(currentLocations.map((item) => item.id))
+      const missingLocations = DEFAULT_LOCATIONS.filter((item) => !knownLocationIds.has(item.id))
+      const knownEdgeIds = new Set((await db.acousticEdges.toArray()).map((item) => item.id))
+      const missingEdges = DEFAULT_ACOUSTIC_EDGES.filter((item) => !knownEdgeIds.has(item.id))
+      if (missingLocations.length || missingEdges.length) {
+        await db.transaction('rw', db.locations, db.acousticEdges, db.worldState, async () => {
+          if (missingLocations.length) await db.locations.bulkPut(missingLocations.map((item) => ({ ...item, createdAt: Date.now(), updatedAt: Date.now() })))
+          if (missingEdges.length) await db.acousticEdges.bulkPut(missingEdges)
+          await db.worldState.update('global', { worldVersion: existing.worldVersion + 1, updatedAt: Date.now() })
+        })
+        currentLocations = await db.locations.toArray()
+      }
+    }
     const currentMap = await db.worldMaps.get('active')
     if (currentMap && currentMap.placementVersion !== PLACEMENT_VERSION) {
       const roots = currentLocations.filter((item) => item.mapBinding)
@@ -118,7 +198,7 @@ export async function ensureWorldInitialized(): Promise<WorldState> {
       const replacement = leafReplacement(appointment.locationId)
       if (replacement && replacement !== appointment.locationId) await db.appointments.update(appointment.id, { locationId: replacement })
     }
-    return (await db.worldState.get('global')) ?? existing
+    return
   }
   await db.transaction('rw', db.worldState, db.locations, db.acousticEdges, db.worldMaps, async () => {
     await db.locations.bulkPut(DEFAULT_LOCATIONS)
@@ -130,7 +210,38 @@ export async function ensureWorldInitialized(): Promise<WorldState> {
       playerLocationId: 'home-living', advancing: false, updatedAt: Date.now(),
     })
   })
-  return (await db.worldState.get('global'))!
+}
+
+/** Runs migrations/repairs once per app lifetime, then keeps hot-path reads to
+ * one indexed worldState lookup. The stored state itself is never cached, so
+ * advancing time or creating a new world is reflected immediately. */
+export async function ensureWorldInitialized(): Promise<WorldState> {
+  if (!worldInitializationPromise) {
+    worldInitializationPromise = initializeWorldStorage().catch((error) => {
+      worldInitializationPromise = undefined
+      throw error
+    })
+  }
+  await worldInitializationPromise
+  const current = await db.worldState.get('global')
+  if (current) {
+    // Tests, imports and restore flows can replace a world after the one-time
+    // promise resolved. A stale pre-v3 map is a cheap indexed signal that the
+    // migration must be re-armed without restoring full-table scans to every
+    // normal chat turn.
+    if (current.worldId === DEFAULT_WORLD_ID && current.worldVersion < 2) {
+      const map = await db.worldMaps.get('active')
+      if (map?.placementVersion !== PLACEMENT_VERSION) {
+        worldInitializationPromise = undefined
+        return ensureWorldInitialized()
+      }
+    }
+    return current
+  }
+  // A backup restore/new-world transaction may clear the table while the app
+  // remains open. Re-arm initialization instead of returning stale state.
+  worldInitializationPromise = undefined
+  return ensureWorldInitialized()
 }
 
 export function nextWorldClock(current: WorldState): Pick<WorldState, 'day' | 'slot' | 'hour' | 'step'> {

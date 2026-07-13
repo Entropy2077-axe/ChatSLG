@@ -530,18 +530,115 @@ test('phone desktop has fixed apps and scene conversations never leak into messa
   await expect(page.getByText('现场会话不应出现', { exact: true })).toHaveCount(0)
 })
 
-test('contacts can exit to phone and exposes background character creation status', async ({ page }) => {
+test('existing fixed worlds migrate atomically to the richer default location set', async ({ page }) => {
+  await page.goto('/#/phone')
+  const result = await page.evaluate(async () => {
+    const { db } = await import('/src/db/db.ts')
+    const { DEFAULT_LOCATIONS, DEFAULT_WORLD_MAP, ensureWorldInitialized } = await import('/src/lib/world.ts')
+    for (const table of db.tables) await table.clear()
+    const oldIds = new Set(['city', 'home', 'home-living', 'home-kitchen', 'home-bedroom', 'school', 'school-classroom', 'school-corridor', 'school-canteen', 'school-playground', 'mall', 'mall-atrium', 'mall-cafe', 'mall-shop', 'hospital', 'hospital-lobby', 'hospital-clinic', 'hospital-ward'])
+    await db.locations.bulkPut(DEFAULT_LOCATIONS.filter((location) => oldIds.has(location.id)))
+    await db.worldMaps.put({ ...DEFAULT_WORLD_MAP, placementVersion: 2 })
+    await db.worldState.put({ id: 'global', worldId: 'default-modern-world', worldVersion: 1, day: 1, slot: 'morning', hour: 8, step: 0, playerLocationId: 'home-living', advancing: false, updatedAt: 1 })
+    const world = await ensureWorldInitialized()
+    const locations = await db.locations.toArray()
+    const map = await db.worldMaps.get('active')
+    return {
+      worldVersion: world.worldVersion,
+      apartmentRooms: locations.filter((location) => location.kind === 'apartment-room').length,
+      required: ['bar', 'hotel', 'university', 'primary-school', 'middle-school', 'grass-park', 'mountain-scenic', 'beach-resort', 'river-park', 'farm'].every((id) => locations.some((location) => location.id === id)),
+      placementVersion: map?.placementVersion,
+      placementBlocked: map?.placementBlocked,
+    }
+  })
+  expect(result).toEqual({ worldVersion: 2, apartmentRooms: 12, required: true, placementVersion: 3, placementBlocked: false })
+})
+
+test('contacts can exit to phone and renders independent background creation jobs without duplicate keys', async ({ page }) => {
+  const duplicateKeyWarnings: string[] = []
+  page.on('console', (message) => {
+    if (message.type() === 'error' && message.text().includes('same key')) duplicateKeyWarnings.push(message.text())
+  })
   await page.goto('/#/phone')
   await page.getByText('联系人', { exact: true }).click()
   await page.evaluate(async () => {
-    const { useContactCreationStore } = await import('/src/store/useContactCreationStore.ts')
-    useContactCreationStore.getState().setGenerating(true)
-    useContactCreationStore.getState().setProgressStep('persona')
+    const { useContactCreationStore } = await import('/src/store/useContactCreationStore')
+    const input = { mode: 'standard' as const, values: { tags: [], ageRange: '', gender: '', relationship: '', personalityTrait: '', hobbies: [], occupation: '学生', relationRows: [] }, extra: '', avatar: '🙂', avatarManuallySet: true, realName: '', nickname: '', birthday: '', customTraits: [] }
+    const now = Date.now()
+    useContactCreationStore.getState().addJob({ id: 'creation-job-1', status: 'persona', input, draft: null, error: '', createdAt: now, updatedAt: now })
+    useContactCreationStore.getState().addJob({ id: 'creation-job-2', status: 'queued', input, draft: null, error: '', createdAt: now + 1, updatedAt: now + 1 })
   })
-  await expect(page.getByText('正在后台创建角色', { exact: true })).toBeVisible()
-  await expect(page.getByText('可以继续使用其他功能，生成不会中断', { exact: true })).toBeVisible()
+  await expect(page.getByText('正在后台生成人设', { exact: true })).toBeVisible()
+  await expect(page.getByText('等待创建（队列第 2 项）', { exact: true })).toBeVisible()
+  expect(duplicateKeyWarnings).toEqual([])
   await page.getByRole('button', { name: '返回' }).click()
   await expect(page).toHaveURL(/#\/phone$/)
+})
+
+test('queued contact creation replaces the creator history entry', async ({ page }) => {
+  await page.route('**/v1/chat/completions', async (route) => {
+    await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ choices: [{ message: { content: JSON.stringify({
+      name: '历史测试角色', persona: '用于验证创建页不会残留在返回历史中的测试角色。', mbti: 'ISTJ', avatarKeyword: '',
+      outfit: { head: '短发', top: '衬衫', bottom: '长裤', outerwear: '无', footwear: '运动鞋', accessories: '无' },
+      schedule: [{ dayOfWeek: 1, slot: 'morning', phoneAccess: 'available', locationId: 'home-living', activity: '休息' }],
+    }) } }] }) })
+  })
+  await page.goto('/#/phone')
+  await page.evaluate(async () => {
+    const { useSettingsStore } = await import('/src/store/useSettingsStore.ts')
+    useSettingsStore.getState().setSettings({ apiKey: 'test-key', baseUrl: 'https://history.test', model: 'test-model' })
+  })
+  await page.getByText('联系人', { exact: true }).click()
+  await page.getByRole('button', { name: '添加联系人' }).first().click()
+  await page.getByRole('button', { name: '程序员', exact: true }).click()
+  await page.getByRole('button', { name: '生成人设预览' }).click()
+  await expect(page).toHaveURL(/#\/contacts$/)
+  await page.getByRole('button', { name: '返回' }).click()
+  await expect(page).toHaveURL(/#\/phone$/)
+  await expect(page.getByRole('heading', { name: '添加联系人' })).toHaveCount(0)
+})
+
+test('contact creation queue keeps running off-page and automatically saves the next valid contact', async ({ page }) => {
+  let requestCount = 0
+  let activeRequests = 0
+  let maxActiveRequests = 0
+  await page.route('**/v1/chat/completions', async (route) => {
+    requestCount += 1
+    activeRequests += 1
+    maxActiveRequests = Math.max(maxActiveRequests, activeRequests)
+    await new Promise((resolve) => setTimeout(resolve, 80))
+    const content = requestCount === 1 ? 'not-json' : JSON.stringify({
+      name: '队列角色', persona: '一个用于验证后台任务队列的可靠角色。', mbti: 'ISTJ', avatarKeyword: '',
+      outfit: { head: '短发', top: '衬衫', bottom: '长裤', outerwear: '无', footwear: '运动鞋', accessories: '无' },
+      schedule: [{ dayOfWeek: 1, slot: 'morning', phoneAccess: 'available', locationId: 'home-living', activity: '休息' }],
+    })
+    await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ choices: [{ message: { content } }] }) })
+    activeRequests -= 1
+  })
+  await page.goto('/#/contact/new')
+  await page.evaluate(async () => {
+    const { db } = await import('/src/db/db.ts')
+    const { ensureWorldInitialized } = await import('/src/lib/world.ts')
+    const { useSettingsStore } = await import('/src/store/useSettingsStore.ts')
+    const { enqueueContactCreation } = await import('/src/lib/contactCreationQueue')
+    for (const table of db.tables) await table.clear()
+    await ensureWorldInitialized()
+    useSettingsStore.getState().setSettings({ apiKey: 'test-key', baseUrl: 'https://queue.test', model: 'test-model', pexelsApiKey: '' })
+    const input = { mode: 'standard' as const, values: { tags: [], ageRange: '23-27', gender: '女', relationship: '朋友', personalityTrait: '', hobbies: [], occupation: '学生', relationRows: [] }, extra: '', avatar: '🙂', avatarManuallySet: true, realName: '', nickname: '', birthday: '', customTraits: [] }
+    await enqueueContactCreation(input)
+    await enqueueContactCreation(input)
+    location.hash = '#/phone'
+  })
+  await expect.poll(() => page.evaluate(async () => {
+    const { useContactCreationStore } = await import('/src/store/useContactCreationStore')
+    const { db } = await import('/src/db/db.ts')
+    return { statuses: useContactCreationStore.getState().jobs.map((job) => job.status), contacts: await db.contacts.count() }
+  })).toEqual({ statuses: ['failed'], contacts: 1 })
+  expect(requestCount).toBe(2)
+  expect(maxActiveRequests).toBe(1)
+  await expect(page).toHaveURL(/#\/phone$/)
+  await page.getByText('联系人', { exact: true }).click()
+  await expect(page.getByText('队列角色', { exact: true })).toBeVisible()
 })
 
 test.skip('relationship deltas are rule based and prompt includes human style rules', async ({ page }) => {

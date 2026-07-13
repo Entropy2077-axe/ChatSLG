@@ -19,6 +19,8 @@ export async function assertAutomaticAiBudget(): Promise<void> {
 export async function recordAiUsage(opts: {
   purpose: AiUsagePurpose; model: string; automatic: boolean; success: boolean
   inputTokens: number; outputTokens: number; estimated: boolean; error?: string
+  cacheHitTokens?: number; cacheMissTokens?: number; reasoningTokens?: number
+  latencyMs?: number; finishReason?: string
 }) {
   await db.aiUsageRecords.add({ id: uuid(), createdAt: Date.now(), ...opts })
 }
