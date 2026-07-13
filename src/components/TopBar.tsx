@@ -11,10 +11,11 @@ interface TopBarProps {
 
 export function TopBar({ title, showBack, showSearch, onSearchClick, right }: TopBarProps) {
   const navigate = useNavigate()
+  const canExit = showBack || title === '确认角色'
   return (
     <header className="relative flex h-12 shrink-0 items-center border-b border-gray-100 bg-white px-2">
       <div className="flex w-14 items-center">
-        {showBack && (
+        {canExit && (
           <button
             onClick={() => navigate(-1)}
             aria-label="返回"

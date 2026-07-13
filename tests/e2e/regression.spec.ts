@@ -530,6 +530,20 @@ test('phone desktop has fixed apps and scene conversations never leak into messa
   await expect(page.getByText('现场会话不应出现', { exact: true })).toHaveCount(0)
 })
 
+test('contacts can exit to phone and exposes background character creation status', async ({ page }) => {
+  await page.goto('/#/phone')
+  await page.getByText('联系人', { exact: true }).click()
+  await page.evaluate(async () => {
+    const { useContactCreationStore } = await import('/src/store/useContactCreationStore.ts')
+    useContactCreationStore.getState().setGenerating(true)
+    useContactCreationStore.getState().setProgressStep('persona')
+  })
+  await expect(page.getByText('正在后台创建角色', { exact: true })).toBeVisible()
+  await expect(page.getByText('可以继续使用其他功能，生成不会中断', { exact: true })).toBeVisible()
+  await page.getByRole('button', { name: '返回' }).click()
+  await expect(page).toHaveURL(/#\/phone$/)
+})
+
 test.skip('relationship deltas are rule based and prompt includes human style rules', async ({ page }) => {
   await page.goto('/#/')
   const result = await page.evaluate(async () => {

@@ -7,6 +7,7 @@ import { TopBar } from '../components/TopBar'
 import { Avatar } from '../components/Avatar'
 import { AvatarPicker } from '../components/AvatarPicker'
 import { useSettingsStore } from '../store/useSettingsStore'
+import { useContactCreationStore, type GenerateValues, type RelationRow } from '../store/useContactCreationStore'
 import { useModuleEnabled } from '../features'
 import { chatCompletion } from '../lib/deepseek'
 import { randomAvatarColor } from '../lib/colors'
@@ -44,34 +45,6 @@ const PROGRESS_PERCENT: Record<'persona' | 'avatar' | 'saving', number> = {
   saving: 95,
 }
 
-interface RelationRow {
-  key: string
-  targetContactId: string
-  label: ContactRelationLabel
-}
-
-interface GenerateValues {
-  tags: string[]
-  ageRange: string
-  gender: string
-  relationship: string
-  personalityTrait: string
-  hobbies: string[]
-  occupation: string
-  relationRows: RelationRow[]
-}
-
-interface CreationDraft {
-  parsed: NonNullable<ReturnType<typeof parsePersonaGeneration>>
-  values: GenerateValues
-  finalAvatar: string
-  avatarPhotographer?: string
-  avatarPhotographerUrl?: string
-  worldVersion: number
-  worldSlot: import('../types').TimeSlot
-  playerLocationId: string
-}
-
 export function ContactAddPage() {
   const navigate = useNavigate()
   const settings = useSettingsStore()
@@ -96,9 +69,7 @@ export function ContactAddPage() {
   const [avatar, setAvatar] = useState(AVATAR_EMOJIS[Math.floor(Math.random() * AVATAR_EMOJIS.length)])
   const [avatarManuallySet, setAvatarManuallySet] = useState(false)
   const [pickingAvatar, setPickingAvatar] = useState(false)
-  const [generating, setGenerating] = useState(false)
-  const [progressStep, setProgressStep] = useState<'persona' | 'avatar' | 'saving' | null>(null)
-  const [error, setError] = useState('')
+  const { generating, progressStep, error, creationDraft, setGenerating, setProgressStep, setError, setCreationDraft } = useContactCreationStore()
   const [relationRows, setRelationRows] = useState<RelationRow[]>([])
   const [customTraits, setCustomTraits] = useState<CustomPersonalityTrait[]>([])
   const [customTendencies, setCustomTendencies] = useState('')
@@ -111,7 +82,6 @@ export function ContactAddPage() {
   const [customBirthday, setCustomBirthday] = useState('')
   const [personaPickerOpen, setPersonaPickerOpen] = useState(false)
   const [personaPage, setPersonaPage] = useState(0)
-  const [creationDraft, setCreationDraft] = useState<CreationDraft | null>(null)
 
   function fallbackBirthday(ageText: string) {
     const ages = [...ageText.matchAll(/\d+/g)].map((m) => Number(m[0])).filter(Number.isFinite)

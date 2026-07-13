@@ -8,6 +8,7 @@ import { SearchOverlay } from '../components/SearchOverlay'
 import { displayName } from '../lib/contact'
 import { createStrawmanContact } from '../lib/strawman'
 import { useSettingsStore } from '../store/useSettingsStore'
+import { useContactCreationStore } from '../store/useContactCreationStore'
 
 const EMPTY_ARRAY: never[] = []
 
@@ -18,6 +19,9 @@ export function ContactsPage() {
   const [strawmanSourceId, setStrawmanSourceId] = useState<string | null>(null)
   const navigate = useNavigate()
   const adminModeEnabled = useSettingsStore((s) => s.adminModeEnabled)
+  const creationGenerating = useContactCreationStore((s) => s.generating)
+  const creationDraft = useContactCreationStore((s) => s.creationDraft)
+  const creationError = useContactCreationStore((s) => s.error)
   const contactsRaw = useLiveQuery(() => db.contacts.toArray(), []) ?? EMPTY_ARRAY
   const contacts = useMemo(
     () => [...contactsRaw].sort((a, b) => displayName(a).localeCompare(displayName(b), 'zh')),
@@ -42,6 +46,7 @@ export function ContactsPage() {
     <div className="relative flex min-h-full flex-col">
       <TopBar
         title="联系人"
+        showBack
         showSearch
         onSearchClick={() => setSearching(true)}
         right={
@@ -58,6 +63,16 @@ export function ContactsPage() {
       />
 
       <div className="flex-1">
+        {(creationGenerating || creationDraft || creationError) && (
+          <button onClick={() => navigate('/contact/new')} className={`flex w-full items-center gap-3 border-b px-4 py-3 text-left ${creationError ? 'border-red-100 bg-red-50' : creationDraft ? 'border-emerald-100 bg-emerald-50' : 'border-violet-100 bg-violet-50'}`}>
+            <span className="flex h-10 w-10 items-center justify-center rounded-xl bg-white text-xl shadow-sm">{creationError ? '⚠️' : creationDraft ? '✅' : '✨'}</span>
+            <div className="min-w-0 flex-1">
+              <p className="text-sm font-medium text-gray-900">{creationError ? '后台创建失败' : creationDraft ? '角色已生成，等待确认' : '正在后台创建角色'}</p>
+              <p className="mt-0.5 truncate text-xs text-gray-500">{creationError || (creationDraft ? `候选角色：${creationDraft.parsed.name}` : '可以继续使用其他功能，生成不会中断')}</p>
+            </div>
+            <span className="text-gray-400">›</span>
+          </button>
+        )}
         <button
           onClick={() => navigate('/contact/new')}
           className="flex w-full items-center gap-3 border-b border-gray-100 px-4 py-3 text-left active:bg-gray-50"
