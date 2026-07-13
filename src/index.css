@@ -1,0 +1,224 @@
+@import 'tailwindcss';
+
+/*
+ * Tailwind v4's default color palette is defined in oklch() (a color space
+ * Chrome only started supporting around version 111 — several years after
+ * a lot of real-world Android WebViews are stuck on). A real device report
+ * (Honor 60, WebView stuck on Chromium 99) showed the bottom nav's buttons
+ * remaining fully clickable/correctly positioned but visually invisible —
+ * layout-correct, paint-failed is the signature of a CSS value the engine
+ * can't parse: `color: oklch(...)` becomes invalid at computed-value time
+ * on an engine with no oklch() support, and per spec an inherited property
+ * like `color` falls back to whatever the ancestor's color is instead of
+ * erroring, silently making text/icons blend into (or vanish against) the
+ * background rather than throwing anything visible. This isn't scoped to
+ * one component — every gray/red/blue/etc utility class app-wide resolves
+ * through these same custom properties, so overriding them here with their
+ * plain-hex equivalents (identical visual color, just expressed in a color
+ * space every browser back to IE6 understands) fixes it globally in one
+ * place instead of hunting down every affected class. Two earlier fix
+ * attempts (viewport-height sync, removing backdrop-blur) both missed —
+ * this was the actual root cause, found by checking what Tailwind's own
+ * build output actually contained rather than guessing another CSS
+ * property. Values are Tailwind's own pre-v4 (classic) hex palette, so
+ * they're not approximations — they're the same colors Tailwind itself
+ * used before switching to oklch.
+ */
+@theme {
+  --color-gray-50: #f9fafb;
+  --color-gray-100: #f3f4f6;
+  --color-gray-200: #e5e7eb;
+  --color-gray-300: #d1d5db;
+  --color-gray-400: #9ca3af;
+  --color-gray-500: #6b7280;
+  --color-gray-600: #4b5563;
+  --color-gray-700: #374151;
+  --color-gray-800: #1f2937;
+  --color-gray-900: #111827;
+  --color-red-50: #fef2f2;
+  --color-red-400: #f87171;
+  --color-red-500: #ef4444;
+  --color-red-600: #dc2626;
+  --color-amber-600: #d97706;
+  --color-yellow-50: #fefce8;
+  --color-green-600: #16a34a;
+  --color-blue-600: #2563eb;
+}
+
+:root {
+  color-scheme: light;
+  /* Real viewport height in px, kept in sync by main.tsx via window.innerHeight.
+     Some Android WebViews (Capacitor's included) don't compute 100dvh/100vh
+     reliably against the actual visible area once the system nav bar is
+     factored in, so anything that needs "the true screen height" should use
+     this instead of the dvh unit directly. 100dvh here is just the pre-JS
+     fallback for the first paint. */
+  --app-height: 100dvh;
+  --app-top-offset: 0px;
+}
+
+:root[data-theme='dark'] {
+  color-scheme: dark;
+}
+
+@keyframes message-in {
+  from { opacity: 0; transform: translateY(6px) scale(.985); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+@keyframes notice-in {
+  from { opacity: 0; transform: translateY(-10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes page-in {
+  from { opacity: .45; }
+  to { opacity: 1; }
+}
+
+.page-transition { animation: page-in 180ms ease-out; }
+
+@keyframes soft-pop {
+  0% { transform: scale(.96); }
+  70% { transform: scale(1.02); }
+  100% { transform: scale(1); }
+}
+
+/* A single global switch keeps visual feedback optional without branching every component. */
+:root[data-animations='off'] *,
+:root[data-animations='off'] *::before,
+:root[data-animations='off'] *::after {
+  animation-duration: 0.01ms !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: 0.01ms !important;
+  scroll-behavior: auto !important;
+}
+
+* {
+  -webkit-tap-highlight-color: transparent;
+}
+
+button {
+  transition: transform 140ms ease, opacity 140ms ease, background-color 160ms ease, color 160ms ease, border-color 160ms ease;
+}
+
+button:active:not(:disabled) {
+  transform: scale(.96);
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+  background: #f4f4f6;
+  font-family: system-ui, -apple-system, 'Segoe UI', Roboto, 'PingFang SC', 'Microsoft YaHei',
+    sans-serif;
+}
+
+body {
+  overscroll-behavior: none;
+}
+
+/*
+ * Center a phone-width shell on wide (PC) viewports; full-bleed on real
+ * mobile widths. This is `height`, not `min-height` — every route's own
+ * content is designed to scroll *inside* a bounded flex-1/overflow-y-auto
+ * region (TabLayout's Outlet wrapper for the 5 tab pages, or each
+ * standalone route's own inner scroll div), keeping TopBar/BottomNav fixed.
+ * `min-height` would let .app-shell itself grow to fit long content instead
+ * of capping at the viewport and forcing that overflow into the intended
+ * inner scroll region — confirmed via a real reproduction: with enough
+ * todos, .app-shell grew past the viewport and pushed BottomNav below the
+ * visible area, needing a page-level scroll to reach it (same shape of bug
+ * as the min-h-full clipping issue on standalone routes, just one level
+ * up the tree). No current route actually needs .app-shell to exceed
+ * viewport height, so there's no legitimate case this breaks.
+ */
+.app-shell {
+  width: 100%;
+  max-width: 480px;
+  margin: 0 auto;
+  height: var(--app-height);
+  background: #ffffff;
+  display: flex;
+  flex-direction: column;
+  position: relative;
+  overflow: hidden;
+}
+
+.theme-dark {
+  background: #111827;
+  color: #e5e7eb;
+}
+
+.theme-dark .bg-white {
+  background-color: #111827 !important;
+}
+
+.theme-dark .bg-\[\#f4f4f6\],
+.theme-dark .bg-\[\#ededed\],
+.theme-dark .bg-gray-50,
+.theme-dark .bg-gray-100 {
+  background-color: #1f2937 !important;
+}
+
+.theme-dark .bg-gray-900 {
+  background-color: #f3f4f6 !important;
+}
+
+.theme-dark .text-white {
+  color: #111827 !important;
+}
+
+.theme-dark .text-gray-900,
+.theme-dark .text-gray-800,
+.theme-dark .text-gray-700,
+.theme-dark .text-gray-600 {
+  color: #e5e7eb !important;
+}
+
+.theme-dark .text-gray-500,
+.theme-dark .text-gray-400,
+.theme-dark .text-gray-300 {
+  color: #9ca3af !important;
+}
+
+.theme-dark .border-gray-100,
+.theme-dark .border-gray-200 {
+  border-color: #374151 !important;
+}
+
+.theme-dark input,
+.theme-dark textarea,
+.theme-dark select {
+  background-color: #111827;
+  color: #e5e7eb;
+  border-color: #374151;
+}
+
+.theme-dark input::placeholder,
+.theme-dark textarea::placeholder {
+  color: #6b7280;
+}
+
+.theme-dark .active\:bg-gray-50:active {
+  background-color: #1f2937 !important;
+}
+
+.theme-dark .bg-\[\#95ec69\] {
+  background-color: #166534 !important;
+  color: #f9fafb !important;
+}
+
+@media (min-width: 481px) {
+  .app-shell {
+    height: var(--app-height);
+    box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.06), 0 20px 60px rgba(0, 0, 0, 0.08);
+  }
+}
+
+::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+}

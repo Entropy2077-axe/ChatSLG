@@ -1,0 +1,725 @@
+import { v4 as uuid } from 'uuid'
+import { db } from '../db/db'
+import { chatCompletion, coalesceConsecutiveRoles, type ChatMessage } from './deepseek'
+import {
+  buildGroupJsonConversionPrompt,
+  buildGroupRawChatPrompt,
+  groupTypingDelayMs,
+  parseGroupAiResponse,
+  pickSociallyConnectedSpeakers,
+  stripSpeakerNamePrefix,
+} from './groupChat'
+import { extractJsonObject } from './aiProtocol'
+import { CONTEXT_WINDOW_SIZE, activeUpcomingPlansText, maybeUpdateGroupMemory, nonGroupScopedMemoriesText } from './memory'
+import { aiRelationshipPrompt } from './contactRelations'
+import { isModuleEnabled } from '../features'
+import { describeCurrentTime } from './time'
+import { describeCurrentSchedule } from './schedule'
+import { displayName } from './contact'
+import { previewForMessage } from './messagePreview'
+import { buildUserProfileText, useChatEngineStore } from './chatEngine'
+import { validateGroupDraft } from './responseQuality'
+import { recentSocialEventsText, recordSocialEvent } from './socialEvents'
+import { recentSharedOriginalContext } from './sharedRecentContext'
+import { useChatUiStore } from '../store/useChatUiStore'
+import { retrieveWorldbookContext } from './worldbook'
+import { generateGroupStoryOutline, storyOutlinePromptSection } from './storyOutline'
+import { buildLogicContext, formatLogicContext } from './logicContext'
+import { audibilityBetween, ensureWorldInitialized } from './world'
+import { applyOutfitChangeProposal } from './outfitChange'
+import type { AppSettings, Contact, Group, GroupAiBubble, Message, Sticker } from '../types'
+
+/** Load recent structured memories for each speaker in parallel. */
+async function loadSpeakerMemories(speakers: Contact[]): Promise<Map<string, string>> {
+  const map = new Map<string, string>()
+  const results = await Promise.all(speakers.map(async (s) => {
+    const text = await nonGroupScopedMemoriesText(s.id)
+    return { id: s.id, text }
+  }))
+  for (const { id, text } of results) {
+    if (text) map.set(id, text)
+  }
+  return map
+}
+
+/**
+ * Same background-engine shape as chatEngine.ts (module-level bookkeeping,
+ * reuses the same useChatEngineStore keyed by conversationId so ChatPage's
+ * aiTyping/error subscription works unchanged for group conversations too)
+ * — kept in its own file rather than folded into chatEngine.ts because the
+ * group turn genuinely has a different shape (multiple personas per turn,
+ * no relationship-dimension updates, a smaller text/sticker-only protocol)
+ * and entangling the two would make chatEngine.ts's single-contact
+ * assumptions harder to reason about. Memory (facts/style/plans) *is*
+ * updated per speaker, via maybeUpdateGroupMemory — see memory.ts.
+ */
+const streamByConversation = new Map<string, string>()
+const timersByConversation = new Map<string, ReturnType<typeof setTimeout>[]>()
+const abortByConversation = new Map<string, AbortController>()
+
+function clearPending(conversationId: string) {
+  timersByConversation.get(conversationId)?.forEach(clearTimeout)
+  timersByConversation.set(conversationId, [])
+  abortByConversation.get(conversationId)?.abort()
+}
+
+function parseGroupTurnDebugPayload(
+  mainPrompt: string,
+  rawText: string,
+  draftFeedback: string | undefined,
+  jsonRaw: string,
+  finalRaw: string,
+  bubbles: GroupAiBubble[],
+  knowledgeQueries: string[],
+  turnSummary: string,
+  groupVibe: string,
+  storyOutline?: string,
+): unknown {
+  const trimmed = finalRaw.trim()
+  const fenceMatch = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/i)
+  const text = fenceMatch ? fenceMatch[1].trim() : trimmed
+  try {
+    const parsed = JSON.parse(text)
+    return parsed && typeof parsed === 'object' ? { ...(parsed as Record<string, unknown>), mainPrompt, rawText, draftFeedback, jsonRaw, finalRaw, parsedBubbles: bubbles, storyOutline, promptTrace: { sections: [{ label: '群聊主提示词', content: mainPrompt }] } } : parsed
+  } catch {
+    const extracted = extractJsonObject(text)
+    if (extracted) {
+      try {
+        const parsed = JSON.parse(extracted)
+        return parsed && typeof parsed === 'object' ? { ...(parsed as Record<string, unknown>), mainPrompt, rawText, draftFeedback, jsonRaw, finalRaw, parsedBubbles: bubbles, storyOutline, promptTrace: { sections: [{ label: '群聊主提示词', content: mainPrompt }] } } : parsed
+      } catch {
+        // fall through
+      }
+    }
+  }
+  return { mainPrompt, rawText, draftFeedback, jsonRaw, finalRaw, parsedBubbles: bubbles, knowledgeQueries, turnSummary, groupVibe, storyOutline, promptTrace: { sections: [{ label: '群聊主提示词', content: mainPrompt }] } }
+}
+
+/** Admin-only safe stop for a group generation and its queued bubbles. */
+export function stopGroupAiTurn(conversationId: string): void {
+  streamByConversation.set(conversationId, uuid())
+  clearPending(conversationId)
+  useChatEngineStore.getState().patch(conversationId, { aiTyping: false, typingLabel: undefined, error: '已由管理员停止本轮群聊生成' })
+}
+
+function parseCompressedGroupMemory(raw: string): string | null {
+  let text = raw.trim()
+  const fenceMatch = text.match(/```(?:json)?\s*([\s\S]*?)```/i)
+  if (fenceMatch) text = fenceMatch[1].trim()
+  try {
+    const parsed = JSON.parse(text)
+    return typeof parsed?.memory === 'string' && parsed.memory.trim() ? parsed.memory.trim() : null
+  } catch {
+    return null
+  }
+}
+
+async function updateGroupMemoryAndVibe(opts: {
+  group: Group
+  aiTurnId: string
+  settings: AppSettings
+  turnSummary: string
+  groupVibe: string
+  logicContextText: string
+}): Promise<void> {
+  const { group, aiTurnId, settings } = opts
+  const now = Date.now()
+  const timeLabel = new Date(now).toLocaleString()
+  const turnSummary = opts.turnSummary.trim()
+  const nextTurnCount = (group.memoryTurnCount ?? 0) + 1
+  const appendedMemory = turnSummary
+    ? [group.memory?.trim() ?? '', `[${timeLabel}] ${turnSummary}`].filter(Boolean).join('\n')
+    : (group.memory ?? '')
+  const patch: Partial<Group> = {
+    memory: appendedMemory,
+    vibe: opts.groupVibe.trim() || group.vibe || '',
+    memoryTurnCount: nextTurnCount,
+  }
+
+  if (nextTurnCount % 5 === 0 && appendedMemory.trim()) {
+    try {
+      const raw = await chatCompletion({
+        apiKey: settings.apiKey,
+        baseUrl: settings.baseUrl,
+        model: settings.utilityModel,
+        jsonMode: true,
+        messages: [
+          {
+            role: 'system',
+            content: `【不可裁剪的ChatSLG逻辑上下文】\n${opts.logicContextText}\n\n你是群聊记忆压缩器。把群"${group.name}"的群聊记忆按时间线压缩，保留重要事件、固定梗、关系变化、长期氛围，不要保留流水账，不得让角色获得未感知的信息。输出JSON: {"memory":"..."}`,
+          },
+          {
+            role: 'user',
+            content: appendedMemory.slice(-5000),
+          },
+        ],
+        purpose: 'memory',
+        automatic: true,
+      })
+      const compressed = parseCompressedGroupMemory(raw)
+      if (compressed) patch.memory = compressed
+    } catch {
+      // best-effort; keep appended memory if compression fails
+    }
+  }
+
+  await db.groups.update(group.id, patch)
+  const turn = await db.aiTurns.get(aiTurnId)
+  if (turn?.parsed && typeof turn.parsed === 'object') {
+    await db.aiTurns.update(aiTurnId, {
+      parsed: { ...(turn.parsed as Record<string, unknown>), groupMemoryUpdate: patch },
+    })
+  }
+}
+
+function messageLabel(message: Message, contactById: Map<string, Contact>, userNickname: string): string {
+  if (message.role === 'user') return userNickname || '我'
+  const speaker = message.speakerContactId ? contactById.get(message.speakerContactId) : undefined
+  return speaker ? displayName(speaker) : '某人'
+}
+
+function messageBody(message: Message): string {
+  if (message.type === 'sticker') return `[表情: ${message.content}]`
+  if (message.type === 'link') return `[链接: ${message.content}]`
+  if (message.type === 'gift') return `[礼物: ${message.content}]`
+  if (message.type === 'scheduleChange') return `[日程: ${message.content}]`
+  return message.content
+}
+
+function formatGroupHistoryMessage(
+  message: Message,
+  contactById: Map<string, Contact>,
+  messageById: Map<string, Message>,
+  userNickname: string,
+): ChatMessage {
+  const speakerLabel = messageLabel(message, contactById, userNickname)
+  const parts: string[] = []
+  if (message.mentions?.length) {
+    const names = message.mentions.map((id) => contactById.get(id)).filter((c): c is Contact => !!c).map(displayName)
+    if (names.length > 0) parts.push(`@${names.join(' @')}`)
+  }
+  if (message.replyToMessageId) {
+    const replied = messageById.get(message.replyToMessageId)
+    if (replied) parts.push(`replying to ${messageLabel(replied, contactById, userNickname)}: "${messageBody(replied)}"`)
+  }
+  parts.push(messageBody(message))
+  return { role: message.role, content: `${speakerLabel}: ${parts.join(' | ')}` }
+}
+
+function targetedContextText(
+  latestUserMessage: Message | undefined,
+  contactById: Map<string, Contact>,
+  messageById: Map<string, Message>,
+  userNickname: string,
+): string {
+  if (!latestUserMessage) return ''
+  const lines: string[] = []
+  if (latestUserMessage.mentions?.length) {
+    const names = latestUserMessage.mentions.map((id) => contactById.get(id)).filter((c): c is Contact => !!c).map(displayName)
+    if (names.length > 0) lines.push(`User explicitly @mentioned: ${names.join(', ')}`)
+  }
+  if (latestUserMessage.replyToMessageId) {
+    const replied = messageById.get(latestUserMessage.replyToMessageId)
+    if (replied) {
+      lines.push(`User is replying to ${messageLabel(replied, contactById, userNickname)}: "${messageBody(replied)}"`)
+    }
+  }
+  return lines.join('\n')
+}
+
+export async function sendGroupMessage(
+  conversationId: string,
+  group: Group,
+  members: Contact[],
+  settings: AppSettings,
+  stickers: Sticker[],
+  text: string,
+  mentionContactIds: string[] = [],
+  replyToMessageId?: string,
+): Promise<void> {
+  if (!text.trim()) return
+  const existingConversation = await db.conversations.get(conversationId)
+  if (existingConversation?.channel === 'scene' && existingConversation.sceneLocationId) {
+    const allContacts = await db.contacts.toArray()
+    const clearMembers: Contact[] = []
+    for (const candidate of allContacts) {
+      if (!candidate.currentLocationId) continue
+      if (await audibilityBetween(existingConversation.sceneLocationId, candidate.currentLocationId) === 'clear') clearMembers.push(candidate)
+    }
+    members = clearMembers
+    group = { ...group, memberContactIds: clearMembers.map((item) => item.id) }
+    await db.groups.update(group.id, { memberContactIds: group.memberContactIds })
+  }
+  if (!settings.apiKey && !(existingConversation?.channel === 'scene' && members.length === 0)) {
+    useChatEngineStore.getState().patch(conversationId, { error: '还没有配置API Key 请先去"我-设置"里填写' })
+    return
+  }
+
+  const streamId = uuid()
+  streamByConversation.set(conversationId, streamId)
+  clearPending(conversationId)
+  useChatEngineStore.getState().patch(conversationId, { error: '', typingLabel: '群成员' })
+
+  const msg: Message = {
+    id: uuid(),
+    conversationId,
+    role: 'user',
+    type: 'text',
+    content: text.trim(),
+    mentions: mentionContactIds.length > 0 ? Array.from(new Set(mentionContactIds)) : undefined,
+    replyToMessageId,
+    createdAt: Date.now(),
+  }
+  await db.messages.add(msg)
+  await db.conversations.update(conversationId, { updatedAt: Date.now() })
+  const conversation = existingConversation ?? await db.conversations.get(conversationId)
+  if (conversation?.channel === 'scene' && conversation.sceneLocationId) {
+    const world = await ensureWorldInitialized()
+    const eventId = uuid()
+    await db.worldEvents.add({ id: eventId, type: 'speech', worldStep: world.step, locationId: conversation.sceneLocationId, actorId: 'user', participantIds: group.memberContactIds, content: text.trim(), visibility: 'scene', createdAt: Date.now() })
+    const allContacts = await db.contacts.toArray()
+    for (const candidate of allContacts) {
+      if (!candidate.currentLocationId) continue
+      const heard = await audibilityBetween(conversation.sceneLocationId, candidate.currentLocationId)
+      if (heard === 'none') continue
+      await db.perceivedEvents.add({ id: uuid(), eventId, characterId: candidate.id, perception: heard === 'clear' ? 'full' : 'muffled', observedAtStep: world.step })
+    }
+  } else if (conversation?.groupId) {
+    const world = await ensureWorldInitialized()
+    await db.worldEvents.put({ id: msg.id, type: 'phone', worldStep: world.step, actorId: 'user', participantIds: group.memberContactIds, content: msg.content, visibility: 'private', createdAt: msg.createdAt })
+    for (const characterId of group.memberContactIds) await db.perceivedEvents.put({ id: uuid(), eventId: msg.id, characterId, perception: 'full', observedAtStep: world.step })
+  }
+  if (msg.mentions?.length || msg.replyToMessageId) {
+    const mentionedNames = msg.mentions
+      ?.map((id) => members.find((member) => member.id === id))
+      .filter((member): member is Contact => !!member)
+      .map(displayName)
+      .join('、')
+    await recordSocialEvent({
+      type: 'group_targeted_message',
+      actorId: 'user',
+      relatedContactIds: Array.from(new Set([...(msg.mentions ?? []), ...group.memberContactIds])),
+      conversationId,
+      groupId: group.id,
+      messageId: msg.id,
+      summary: mentionedNames
+        ? `群聊"${group.name}"里，用户@了${mentionedNames}: ${text.trim()}`
+        : `群聊"${group.name}"里，用户回复了一条消息: ${text.trim()}`,
+      importance: 2,
+    })
+  }
+
+  if (conversation?.channel === 'scene' && members.length === 0) {
+    useChatEngineStore.getState().patch(conversationId, { aiTyping: false, typingLabel: undefined, error: '' })
+    return
+  }
+
+  runGroupAiTurn(conversationId, group, members, settings, stickers, streamId)
+}
+
+export async function regenerateGroupAiTurn(
+  conversationId: string,
+  group: Group,
+  members: Contact[],
+  settings: AppSettings,
+  stickers: Sticker[],
+  aiTurnId: string,
+): Promise<void> {
+  if (!settings.apiKey) {
+    useChatEngineStore.getState().patch(conversationId, { error: '还没有配置 API Key，请先去“我 / 设置”里填写' })
+    return
+  }
+
+  const streamId = uuid()
+  streamByConversation.set(conversationId, streamId)
+  clearPending(conversationId)
+  useChatEngineStore.getState().patch(conversationId, { error: '', typingLabel: '群成员' })
+
+  const turnMessages = await db.messages
+    .where('conversationId')
+    .equals(conversationId)
+    .filter((message) => message.debugAiTurnId === aiTurnId)
+    .toArray()
+  if (turnMessages.length > 0) await db.messages.bulkDelete(turnMessages.map((message) => message.id))
+  await db.aiTurns.delete(aiTurnId)
+  await db.conversations.update(conversationId, { updatedAt: Date.now() })
+
+  await runGroupAiTurn(conversationId, group, members, settings, stickers, streamId)
+}
+
+async function runGroupAiTurn(
+  conversationId: string,
+  group: Group,
+  members: Contact[],
+  settings: AppSettings,
+  stickers: Sticker[],
+  streamId: string,
+): Promise<void> {
+  const engine = useChatEngineStore.getState()
+  engine.patch(conversationId, { aiTyping: true, error: '', typingLabel: '群成员' })
+  console.log(`[group] 开始生成回复 群=${group.name} conversationId=${conversationId}`)
+  try {
+    if (members.length === 0) {
+      engine.patch(conversationId, { error: '这个群里已经没有成员了', aiTyping: false, typingLabel: undefined })
+      return
+    }
+
+    const contactById = new Map(members.map((c) => [c.id, c]))
+
+    const history = await db.messages.where('conversationId').equals(conversationId).sortBy('createdAt')
+    const messageById = new Map(history.map((m) => [m.id, m]))
+    const latestUserMessage = [...history].reverse().find((m) => m.role === 'user')
+    const preferredSpeakerIds = new Set(latestUserMessage?.mentions ?? [])
+    const replied = latestUserMessage?.replyToMessageId ? messageById.get(latestUserMessage.replyToMessageId) : undefined
+    if (replied?.role === 'assistant' && replied.speakerContactId) preferredSpeakerIds.add(replied.speakerContactId)
+    const speakers = await pickSociallyConnectedSpeakers(members, Array.from(preferredSpeakerIds), group.speakerLimit ?? 3)
+    console.log(`[group] 本轮发言人: ${speakers.map((s) => s.name).join('、')}`)
+    const targetContext = targetedContextText(latestUserMessage, contactById, messageById, settings.userNickname)
+    const recentEventsText = await recentSocialEventsText(members.map((m) => m.id), 4)
+    const sharedOriginalContext = await recentSharedOriginalContext(members.map((m) => m.id), settings.userNickname, { maxMessages: 120, maxChars: 20_000 })
+    const worldbookText = isModuleEnabled('worldview') ? await retrieveWorldbookContext([group.name, group.vibe, targetContext, history.slice(-10).map((m) => m.content).join(' '), members.map((m) => `${m.name} ${m.systemPrompt}`).join(' ')].filter(Boolean).join('\n')) : ''
+    const logicBundles = await Promise.all(speakers.map((speaker) => buildLogicContext({
+      subjectId: speaker.id,
+      participantIds: speakers.map((item) => item.id),
+      conversationId,
+      query: [group.name, targetContext].filter(Boolean).join(' '),
+    })))
+    const logicContextText = logicBundles
+      .map((bundle, index) => formatLogicContext(bundle, { includeLocationTree: index === 0 }))
+      .join('\n\n')
+    if (logicContextText.length > 180_000) throw new Error('全部参与角色的强制逻辑上下文过大，请精简地点描述或角色人设后重试；系统不会省略地点树、日程、约定或人设边界')
+
+    const speakerMemoriesMap = await loadSpeakerMemories(speakers)
+    const aiRelationshipText = await aiRelationshipPrompt(members)
+    const systemPrompt = buildGroupRawChatPrompt({
+      stylePrompt: settings.globalSystemPrompt,
+      groupName: group.name,
+      allMembers: members,
+      speakers,
+      stickerNames: stickers.map((s) => s.name),
+      groupMemoryText: group.memory,
+      groupVibeText: group.vibe,
+      allowAiChatter: group.allowAiChatter ?? true,
+      energyLevel: group.energyLevel ?? 'normal',
+      currentTimeText: describeCurrentTime(new Date()),
+      userProfileText: buildUserProfileText(settings),
+      targetedContextText: targetContext,
+      recentEventsText: recentEventsText || undefined,
+      worldviewText: worldbookText || undefined,
+      selfIterationGlobalText: isModuleEnabled('selfIteration') ? settings.selfIterationGlobalPrompt : undefined,
+      speakerMemoriesMap,
+      aiRelationshipText,
+    })
+
+    const recentHistory = history.slice(-CONTEXT_WINDOW_SIZE)
+    const controller = new AbortController()
+    abortByConversation.set(conversationId, controller)
+
+    let storyOutline = ''
+    if (isModuleEnabled('storyOutline')) {
+      const speakerPremises = speakers
+        .map((speaker, i) => {
+          const recentMemo = speakerMemoriesMap.get(speaker.id)
+          return `发言人${i + 1}: ${displayName(speaker)}
+人设: ${speaker.systemPrompt || '自由发挥'}
+关系: ${speaker.relationshipBase || '朋友'}${speaker.relationshipDynamic ? `（${speaker.relationshipDynamic}）` : ''}
+记忆: ${speaker.memoryFacts || '暂无'}
+相处习惯: ${speaker.memoryStyle || '暂无'}
+当前状态: ${describeCurrentSchedule(speaker, new Date()) || '没有特别安排'}
+约定: ${activeUpcomingPlansText(speaker, new Date()) || '无'}${recentMemo ? `\n最近记忆碎片:\n${recentMemo}` : ''}`
+        })
+        .join('\n\n')
+      const premiseText = [
+        `【群名】${group.name}`,
+        `【群成员】\n${members.map((m) => `- ${displayName(m)}`).join('\n')}`,
+        group.memory ? `【群聊记忆】\n${group.memory}` : '',
+        group.vibe ? `【群聊氛围】\n${group.vibe}` : '',
+        `【当前时间】${describeCurrentTime(new Date())}`,
+        `【用户资料】${buildUserProfileText(settings)}`,
+        targetContext ? `【本轮定向上下文】\n${targetContext}` : '',
+        recentEventsText ? `【最近发生的事】\n${recentEventsText}` : '',
+        worldbookText ? `【世界书命中】\n${worldbookText}` : '',
+        `【发言人逻辑前提】\n${speakerPremises}`,
+      ].filter(Boolean).join('\n\n')
+      try {
+        storyOutline = await generateGroupStoryOutline({
+          settings,
+          groupName: group.name,
+          members,
+          speakers,
+          premiseText,
+          history: recentHistory,
+          allowAiChatter: group.allowAiChatter ?? true,
+          energyLevel: group.energyLevel ?? 'normal',
+          signal: controller.signal,
+        })
+        if (storyOutline) console.log(`[story-outline][group] 群=${group.name}\n${storyOutline}`)
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err)
+        console.warn(`[story-outline][group] 生成失败 群=${group.name}: ${message}`)
+      }
+      if (streamByConversation.get(conversationId) !== streamId) return
+    }
+
+    const outlineSection = storyOutlinePromptSection(storyOutline)
+    // Group history needs an explicit "who said this" label per line — unlike
+    // 1:1 chat where the single assistant persona is implicit from the system
+    // prompt, a group turn's assistant block can contain several different
+    // people, and role:"assistant" alone can't distinguish them across turns.
+    const chatMessages: ChatMessage[] = coalesceConsecutiveRoles([
+      { role: 'system', content: [logicContextText, systemPrompt, sharedOriginalContext, outlineSection].filter(Boolean).join('\n\n') },
+      ...recentHistory.map((m): ChatMessage => formatGroupHistoryMessage(m, contactById, messageById, settings.userNickname)),
+    ])
+    let rawText = await chatCompletion({
+      apiKey: settings.apiKey,
+      baseUrl: settings.baseUrl,
+      model: settings.model,
+      messages: chatMessages,
+      signal: controller.signal,
+      purpose: 'chat',
+      trace: { turnId: streamId, stage: 'first_chat', conversationId },
+    })
+
+    if (streamByConversation.get(conversationId) !== streamId) return
+    console.log(`[group] 主模型群聊草稿(${rawText.length}字): ${rawText.slice(0, 160)}...`)
+    let draftFeedback: string | undefined
+    const draftCheck = await validateGroupDraft({
+      settings,
+      groupName: group.name,
+      speakers,
+      rawText,
+      allowAiChatter: group.allowAiChatter ?? true,
+      energyLevel: group.energyLevel ?? 'normal',
+      targetedContext: targetContext,
+      sharedRecentContext: sharedOriginalContext,
+      worldbookText: worldbookText || undefined,
+      logicContextText,
+      signal: controller.signal,
+      trace: { turnId: streamId, stage: 'first_quality', conversationId },
+    })
+    if (streamByConversation.get(conversationId) !== streamId) return
+    if (!draftCheck.valid) {
+      draftFeedback = draftCheck.reason || '草稿不符合群聊特殊规则'
+      console.warn(`[group] 主模型草稿未通过校验 群=${group.name} 原因=${draftFeedback}`)
+      rawText = await chatCompletion({
+        apiKey: settings.apiKey,
+        baseUrl: settings.baseUrl,
+        model: settings.model,
+        messages: coalesceConsecutiveRoles([
+          ...chatMessages,
+          {
+            role: 'user',
+            content: `上一版群聊草稿没有通过校验，请严格按反馈重写一次。
+
+【校验反馈】
+${draftFeedback}
+
+【上一版草稿】
+${rawText}
+
+必须重新输出群聊纯文本草稿，不要解释，不要输出JSON。
+第一行第一个字符必须是 <。
+每一行必须严格是: <人名>（想法）[心情]“消息内容”
+尤其注意：AI互聊规则、群聊热闹程度、每行必须有非空（想法）和非空[心情]，消息内容里不要残留人名冒号/括号/方括号。
+如果上一版反复使用同一个特殊词、梗、比喻、称号或外号，这一版必须减少复读，并自然收束或换到相邻话题。`,
+          },
+        ]),
+        signal: controller.signal,
+        purpose: 'chat',
+        trace: { turnId: streamId, stage: 'second_chat', conversationId },
+      })
+      if (streamByConversation.get(conversationId) !== streamId) return
+      console.log(`[group] 主模型重写草稿(${rawText.length}字): ${rawText.slice(0, 160)}...`)
+    }
+
+    let jsonRaw = await chatCompletion({
+      apiKey: settings.apiKey,
+      baseUrl: settings.baseUrl,
+      model: settings.utilityModel,
+      messages: [
+        {
+          role: 'system',
+          content: buildGroupJsonConversionPrompt(rawText, speakers, stickers.map((s) => s.name), logicContextText),
+        },
+      ],
+      jsonMode: true,
+      signal: controller.signal,
+      trace: { turnId: streamId, stage: 'other', conversationId },
+    })
+
+    if (streamByConversation.get(conversationId) !== streamId) return
+    let finalRaw = jsonRaw
+    let { bubbles, knowledgeQueries, turnSummary, groupVibe, outfitChanges } = parseGroupAiResponse(finalRaw, speakers.length)
+    // Intentionally no post-JSON model review. The first draft validator above
+    // remains, and parsed output is still constrained by speaker indexes and
+    // deterministic world rules. Talk's second review proved destructive in
+    // real group chats and is deliberately omitted in ChatSLG.
+    knowledgeQueries = []
+    console.log(`[group] 收到回复(${finalRaw.length}字) 解析出${bubbles.length}条气泡 群=${group.name}`)
+    if (bubbles.length === 0) {
+      console.warn(`[group] 本轮没有人回复 群=${group.name} 原始内容: ${rawText.slice(0, 200)}`)
+      engine.patch(conversationId, { error: '群里这次没有人回复 可以再发一条试试', aiTyping: false, typingLabel: undefined })
+      return
+    }
+    const latestWorld = await db.worldState.get('global')
+    if (!latestWorld || latestWorld.worldVersion !== logicBundles[0].worldVersion) throw new Error('地点树已变化，本轮回复已取消，请重新发送')
+    const allowedOutfitCharacters = new Set(members.map((item) => item.id))
+    for (const proposal of outfitChanges) {
+      if (!allowedOutfitCharacters.has(proposal.characterId)) continue
+      try { await applyOutfitChangeProposal(proposal) } catch (err) { console.warn('[outfit] 群聊衣着提案被拒绝', err) }
+    }
+    const aiTurnId = uuid()
+    await db.aiTurns.add({
+      id: aiTurnId,
+      conversationId,
+      raw: finalRaw,
+      parsed: parseGroupTurnDebugPayload(systemPrompt, rawText, draftFeedback, jsonRaw, finalRaw, bubbles, knowledgeQueries, turnSummary, groupVibe, storyOutline),
+      knowledgeQueries,
+      logicTrace: {
+        worldVersion: logicBundles[0].worldVersion,
+        locationTreeVersion: logicBundles[0].worldVersion,
+        personaSummaries: speakers.map((speaker) => speaker.systemPrompt.slice(0, 500)),
+        schedules: logicBundles.flatMap((bundle) => [...bundle.subject.baseSchedule, ...bundle.subject.scheduleOverrides].map((item) => `${item.characterId}/${item.priority}/${item.effectiveDay ?? item.dayOfWeek}/${item.slot}@${item.locationId}`)),
+        appointmentIds: [...new Set(logicBundles.flatMap((bundle) => bundle.subject.commitments.map((item) => item.id)))],
+        memoryIds: logicBundles.flatMap((bundle) => bundle.memories.map((item) => item.id)),
+        perceivedEventIds: [...new Set(logicBundles.flatMap((bundle) => bundle.perceivedEvents.map((item) => item.eventId)))],
+        validation: draftFeedback ? 'rejected' : 'passed',
+        validationReason: draftFeedback || undefined,
+      },
+      createdAt: Date.now(),
+    })
+    // Legacy free-form group plan cards are intentionally not committed.
+    // Authoritative appointments require a legal locationId, worldVersion,
+    // explicit participant consent and source events; a natural-language
+    // candidate alone cannot mutate the world.
+    void updateGroupMemoryAndVibe({ group, aiTurnId, settings, turnSummary, groupVibe, logicContextText })
+    revealGroupBubbles(conversationId, group, members, speakers, bubbles, streamId, settings, aiTurnId, turnSummary, logicContextText, logicBundles[0].worldVersion)
+  } catch (err) {
+    if (streamByConversation.get(conversationId) !== streamId) return
+    if (err instanceof DOMException && err.name === 'AbortError') return
+    const message = err instanceof Error ? err.message : String(err)
+    console.error(`[group] 生成回复出错 群=${group.name}:`, message)
+    engine.patch(conversationId, { error: message, aiTyping: false, typingLabel: undefined })
+  }
+}
+
+function revealGroupBubbles(
+  conversationId: string,
+  group: Group,
+  members: Contact[],
+  speakers: Contact[],
+  bubbles: GroupAiBubble[],
+  streamId: string,
+  settings: AppSettings,
+  aiTurnId: string,
+  turnSummary: string,
+  logicContextText: string,
+  logicWorldVersion: number,
+): void {
+  const timers: ReturnType<typeof setTimeout>[] = []
+  let cumulative = 0
+  bubbles.forEach((bubble, i) => {
+    cumulative += groupTypingDelayMs(bubble)
+    const timer = setTimeout(async () => {
+      if (streamByConversation.get(conversationId) !== streamId) return
+      const latestWorld = await db.worldState.get('global')
+      if (!latestWorld || latestWorld.worldVersion !== logicWorldVersion) {
+        streamByConversation.delete(conversationId)
+        useChatEngineStore.getState().patch(conversationId, { error: '地点树已变化，本轮剩余回复已取消', aiTyping: false, typingLabel: undefined })
+        return
+      }
+
+      const speaker = speakers[bubble.speakerIndex - 1]
+      useChatEngineStore.getState().patch(conversationId, {
+        typingLabel: speaker ? displayName(speaker) : '群成员',
+      })
+      const content =
+        bubble.type === 'text'
+          ? stripSpeakerNamePrefix(
+              bubble.content,
+              members.map((m) => m.name),
+            )
+          : ''
+
+      const msg: Message = {
+        id: uuid(),
+        conversationId,
+        role: 'assistant',
+        type: bubble.type,
+        content,
+        speakerContactId: speaker?.id,
+        debugAiTurnId: aiTurnId,
+        debugParsedBubble: bubble,
+        thought: bubble.thought,
+        createdAt: Date.now(),
+      }
+      await db.messages.add(msg)
+      const conversation = await db.conversations.get(conversationId)
+      if (conversation?.channel === 'scene' && conversation.sceneLocationId && speaker?.id) {
+        const world = await ensureWorldInitialized()
+        const eventId = uuid()
+        const allContacts = await db.contacts.toArray()
+        const fullListeners: string[] = []
+        const perceived: Array<{ characterId: string; perception: 'full' | 'muffled' }> = []
+        for (const candidate of allContacts) {
+          if (!candidate.currentLocationId) continue
+          const heard = await audibilityBetween(conversation.sceneLocationId, candidate.currentLocationId)
+          if (heard === 'none') continue
+          const perception = heard === 'clear' ? 'full' : 'muffled'
+          if (perception === 'full') fullListeners.push(candidate.id)
+          perceived.push({ characterId: candidate.id, perception })
+        }
+        await db.worldEvents.add({
+          id: eventId, type: 'speech', worldStep: world.step,
+          locationId: conversation.sceneLocationId, actorId: speaker.id,
+          participantIds: fullListeners, content, visibility: 'scene', createdAt: msg.createdAt,
+        })
+        for (const heard of perceived) {
+          await db.perceivedEvents.add({ id: uuid(), eventId, characterId: heard.characterId, perception: heard.perception, observedAtStep: world.step })
+        }
+      }
+      if (speaker?.id && bubble.mood) {
+        await db.contacts.update(speaker.id, {
+          mood: { text: bubble.mood, expiresAt: Date.now() + settings.moodExpiryMs },
+        })
+      }
+      await db.conversations.update(conversationId, { updatedAt: Date.now() })
+
+      if (conversation?.channel !== 'scene' && useChatUiStore.getState().activeConversationId !== conversationId) {
+        useChatUiStore.getState().showNotification({
+          id: uuid(),
+          conversationId,
+          contactName: group.name,
+          contactAvatar: group.avatar,
+          contactAvatarColor: group.avatarColor,
+          preview: previewForMessage(msg, speaker ? displayName(speaker) : undefined),
+        })
+      }
+
+      if (i === bubbles.length - 1) {
+        useChatEngineStore.getState().patch(conversationId, { aiTyping: false, typingLabel: undefined })
+        maybeUpdateGroupMemory(group.id, conversationId, members, settings, logicContextText)
+
+        // A group conversation is shared context: unlike a private chat, it
+        // can naturally colour a member's later 1:1 chat and a follow-up
+        // moment. Persist only the model's one-line group summary, never the
+        // raw transcript, so this creates continuity without leaking details
+        // from messages that were not meant to leave the group.
+        if (turnSummary.trim()) {
+          await recordSocialEvent({
+            type: 'group_turn',
+            actorId: speaker?.id ?? 'user',
+            relatedContactIds: group.memberContactIds,
+            conversationId,
+            groupId: group.id,
+            messageId: msg.id,
+            summary: `群聊“${group.name}”刚聊到：${turnSummary.trim()}`,
+            importance: 2,
+          })
+        }
+      }
+    }, cumulative)
+    timers.push(timer)
+  })
+  timersByConversation.set(conversationId, timers)
+}
