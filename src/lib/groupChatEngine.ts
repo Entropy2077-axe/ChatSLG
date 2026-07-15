@@ -19,6 +19,7 @@ import { isWorldPhoneAvailable } from './schedule'
 import { displayName } from './contact'
 import { previewForMessage } from './messagePreview'
 import { buildUserProfileText, useChatEngineStore } from './chatEngine'
+import { waitForMessageReveal } from './messagePacing'
 import { recentSocialEventsText, recordSocialEvent } from './socialEvents'
 import { recentSharedOriginalContext } from './sharedRecentContext'
 import { useChatUiStore } from '../store/useChatUiStore'
@@ -635,7 +636,7 @@ async function runGroupAiTurn(
     // explicit participant consent and source events; a natural-language
     // candidate alone cannot mutate the world.
     void updateGroupMemoryAndVibe({ group, aiTurnId, settings, turnSummary, groupVibe, logicContextText })
-    await revealGroupBubbles(conversationId, group, members, speakers, bubbles, streamId, settings, aiTurnId, turnSummary, logicContextText, logicBundles[0].worldVersion, assistantEvidenceIds, latestUserMessage, turnStartedAt)
+    await revealGroupBubbles(conversationId, group, members, speakers, bubbles, streamId, settings, aiTurnId, turnSummary, logicContextText, logicBundles[0].worldVersion, assistantEvidenceIds, latestUserMessage, controller.signal, turnStartedAt)
   } catch (err) {
     if (streamByConversation.get(conversationId) !== streamId) return
     if (err instanceof DOMException && err.name === 'AbortError') return
@@ -661,6 +662,7 @@ async function revealGroupBubbles(
   logicWorldVersion: number,
   assistantEvidenceIds: string[] = [],
   latestUserMessage?: Message,
+  signal: AbortSignal = new AbortController().signal,
   turnStartedAt = performance.now(),
 ): Promise<void> {
   const latestWorld = await db.worldState.get('global')
@@ -686,15 +688,19 @@ async function revealGroupBubbles(
     useChatEngineStore.getState().patch(conversationId, { error: '群聊草稿没有可显示内容', aiTyping: false, typingLabel: undefined })
     return
   }
+  const firstMessage = messages[0]
   await db.transaction('rw', db.messages, db.conversations, async () => {
-    await db.messages.bulkAdd(messages)
-    await db.conversations.update(conversationId, { updatedAt: messages.at(-1)!.createdAt })
+    await db.messages.add(firstMessage)
+    await db.conversations.update(conversationId, { updatedAt: firstMessage.createdAt })
   })
   const conversation = await db.conversations.get(conversationId)
   const visibleAt = performance.now()
-  useChatEngineStore.getState().patch(conversationId, { typingLabel: '正在同步状态' })
+  const nextSpeaker = messages[1] ? members.find((member) => member.id === messages[1].speakerContactId) : undefined
+  useChatEngineStore.getState().patch(conversationId, { typingLabel: nextSpeaker ? displayName(nextSpeaker) : '群成员' })
   const stateStartedAt = performance.now()
-  try {
+  const revealedMessages = [firstMessage]
+  let revealBlocked = false
+  const stateTask = (async () => {
     const listenerIds = conversation?.channel === 'scene' && conversation.sceneLocationId
       ? (await Promise.all(speakers.map(async (speaker) => ({ id: speaker.id, heard: speaker.currentLocationId ? await audibilityBetween(conversation.sceneLocationId!, speaker.currentLocationId) : 'none' })))).filter((item) => item.heard === 'clear').map((item) => item.id)
       : speakers.map((speaker) => speaker.id)
@@ -712,26 +718,58 @@ async function revealGroupBubbles(
       ],
       trace: { turnId: streamId, stage: 'state', conversationId },
     })
-    await Promise.all(messages.map((message) => db.messages.update(message.id, { pending: false })))
-  } catch (error) {
-    await db.messages.bulkDelete(messages.map((message) => message.id))
-    await db.conversations.update(conversationId, { updatedAt: Date.now() })
+  })().catch((error) => {
+    revealBlocked = true
     throw error
+  })
+  const notifyMessage = (message: Message) => {
+    if (conversation?.channel === 'scene' || useChatUiStore.getState().activeConversationId === conversationId) return
+    const speaker = members.find((member) => member.id === message.speakerContactId)
+    useChatUiStore.getState().showNotification({
+      id: uuid(), conversationId, contactName: group.name, contactAvatar: group.avatar,
+      contactAvatarColor: group.avatarColor,
+      preview: previewForMessage(message, speaker ? displayName(speaker) : undefined),
+    })
   }
+  const revealTask = (async () => {
+    notifyMessage(firstMessage)
+    for (let index = 1; index < messages.length; index++) {
+      await waitForMessageReveal(messages[index - 1].content, signal)
+      if (revealBlocked) return false
+      if (signal.aborted || streamByConversation.get(conversationId) !== streamId) return false
+      const message = messages[index]
+      await db.transaction('rw', db.messages, db.conversations, async () => {
+        await db.messages.add(message)
+        await db.conversations.update(conversationId, { updatedAt: message.createdAt })
+      })
+      revealedMessages.push(message)
+      notifyMessage(message)
+      const followingMessage = messages[index + 1]
+      if (followingMessage) {
+        const followingSpeaker = members.find((member) => member.id === followingMessage.speakerContactId)
+        useChatEngineStore.getState().patch(conversationId, { typingLabel: followingSpeaker ? displayName(followingSpeaker) : '群成员' })
+      }
+    }
+    useChatEngineStore.getState().patch(conversationId, { typingLabel: undefined })
+    return true
+  })()
+  const [stateResult, revealResult] = await Promise.allSettled([stateTask, revealTask])
+  if (stateResult.status === 'rejected' || revealResult.status === 'rejected') {
+    await db.messages.bulkDelete(revealedMessages.map((message) => message.id))
+    await db.conversations.update(conversationId, { updatedAt: Date.now() })
+    const failure = stateResult.status === 'rejected'
+      ? stateResult.reason
+      : revealResult.status === 'rejected' ? revealResult.reason : new Error('群聊消息播放失败')
+    throw failure
+  }
+  await Promise.all(revealedMessages.map((message) => db.messages.update(message.id, { pending: false })))
+  if (!revealResult.value) return
+  const lastMessage = messages.at(-1)!
+  const lastSpeaker = members.find((member) => member.id === lastMessage.speakerContactId)
   const unlockedAt = performance.now()
   console.info(`[回合耗时｜群聊] 首次显示=${Math.round(visibleAt - turnStartedAt)}ms；状态裁决与提交=${Math.round(unlockedAt - stateStartedAt)}ms；解锁=${Math.round(unlockedAt - turnStartedAt)}ms`)
   useChatEngineStore.getState().patch(conversationId, { aiTyping: false, typingLabel: undefined })
   if (streamByConversation.get(conversationId) === streamId) streamByConversation.delete(conversationId)
-
-  const lastMessage = messages.at(-1)!
-  const lastSpeaker = members.find((member) => member.id === lastMessage.speakerContactId)
-  if (conversation?.channel !== 'scene' && useChatUiStore.getState().activeConversationId !== conversationId) {
-    useChatUiStore.getState().showNotification({
-      id: uuid(), conversationId, contactName: group.name, contactAvatar: group.avatar,
-      contactAvatarColor: group.avatarColor,
-      preview: previewForMessage(lastMessage, lastSpeaker ? displayName(lastSpeaker) : undefined),
-    })
-  }
 
   // Side effects run after the complete paid turn is already visible.
   void Promise.all(messages.map(async (message, index) => {

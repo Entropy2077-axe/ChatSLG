@@ -22,6 +22,7 @@ const GroupAddPage = page(() => import('./pages/GroupAddPage'), 'GroupAddPage')
 const GroupInfoPage = page(() => import('./pages/GroupInfoPage'), 'GroupInfoPage')
 const MomentsPage = page(() => import('./pages/MomentsPage'), 'MomentsPage')
 const SettingsPage = page(() => import('./pages/SettingsPage'), 'SettingsPage')
+const MindReadingSettingsPage = page(() => import('./pages/MindReadingSettingsPage'), 'MindReadingSettingsPage')
 const ProfileEditPage = page(() => import('./pages/ProfileEditPage'), 'ProfileEditPage')
 const WorldSettingsPage = page(() => import('./pages/WorldSettingsPage'), 'WorldSettingsPage')
 const RelationshipsPage = page(() => import('./pages/RelationshipsPage'), 'RelationshipsPage')
@@ -115,6 +116,7 @@ function App() {
         <Route path="/group/:groupId" element={<GroupInfoPage />} />
         <Route path="/social-inbox" element={<SocialInboxPage />} />
         <Route path="/settings" element={<SettingsPage />} />
+        <Route path="/settings/mind-reading" element={<MindReadingSettingsPage />} />
         <Route path="/settings/scene-archives" element={<SceneArchivePage />} />
         <Route path="/new-world" element={<NewWorldPage />} />
         <Route path="/stickers" element={<Navigate to="/phone" replace />} />

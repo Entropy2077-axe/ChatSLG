@@ -5,6 +5,7 @@ import { db } from '../db/db'
 import { TopBar } from '../components/TopBar'
 import { Avatar } from '../components/Avatar'
 import { MessageBubble } from '../components/MessageBubble'
+import { ThoughtBubble } from '../components/ThoughtBubble'
 import { SearchOverlay } from '../components/SearchOverlay'
 import { ActionSheet } from '../components/ActionSheet'
 import { useSettingsStore } from '../store/useSettingsStore'
@@ -22,6 +23,7 @@ import { claimRedPacket, transferFunds, USER_WALLET_ID } from '../lib/finance'
 import { audibilityBetween } from '../lib/world'
 
 const EMPTY_MESSAGES: Message[] = []
+const EMPTY_CONTACTS: Contact[] = []
 
 export function ChatPage({ conversationIdOverride, embedded = false }: { conversationIdOverride?: string; embedded?: boolean } = {}) {
   const { conversationId: routeConversationId } = useParams()
@@ -31,7 +33,8 @@ export function ChatPage({ conversationIdOverride, embedded = false }: { convers
   const navigate = useNavigate()
   const settings = useSettingsStore()
   const setActiveConversation = useChatUiStore((s) => s.setActiveConversation)
-  const mindReadingEnabled = useModuleEnabled('mindReading')
+  const mindReadingEnabled = settings.mindReadingEnabled ?? true
+  const mindReadingStyle = settings.mindReadingStyle ?? 'narration'
   const careerEnabled = useModuleEnabled('career')
 
   const conversation = useLiveQuery(
@@ -55,7 +58,14 @@ export function ChatPage({ conversationIdOverride, embedded = false }: { convers
   const groupMembers = useMemo(() => Array.from(new Map((groupMembersRaw ?? []).filter((c): c is Contact => !!c).map((contact) => [contact.id, contact])).values()), [groupMembersRaw])
   const memberById = useMemo(() => new Map(groupMembers.map((c) => [c.id, c])), [groupMembers])
   const world = useLiveQuery(() => db.worldState.get('global'), [])
-  const allContacts = useLiveQuery(() => (conversation?.channel === 'scene' ? db.contacts.orderBy('createdAt').toArray() : Promise.resolve([] as Contact[])), [conversation]) ?? []
+  const allContacts = useLiveQuery(() => (conversation?.channel === 'scene' ? db.contacts.orderBy('createdAt').toArray() : Promise.resolve([] as Contact[])), [conversation]) ?? EMPTY_CONTACTS
+  // Scene membership changes as characters move. Resolve historical message
+  // identities against every contact so a departed speaker keeps their name
+  // and avatar, while the live roster can still control who may speak now.
+  const speakerById = useMemo(
+    () => conversation?.channel === 'scene' ? new Map(allContacts.map((candidate) => [candidate.id, candidate])) : memberById,
+    [conversation?.channel, allContacts, memberById],
+  )
   const scenePeople = useLiveQuery(async () => {
     if (conversation?.channel !== 'scene' || !conversation.sceneLocationId) return [] as Array<{ contact: Contact; state: 'here' | 'audible' | 'away' }>
     return Promise.all(allContacts.map(async (candidate) => {
@@ -234,8 +244,8 @@ export function ChatPage({ conversationIdOverride, embedded = false }: { convers
   function labelForMessage(message: Message): string {
     if (message.role === 'user') return settings.userNickname || '我'
     const speaker =
-      isGroupConv && message.speakerContactId ? memberById.get(message.speakerContactId) : isGroupConv ? undefined : contact!
-    return speaker ? displayName(speaker) : isGroupConv ? group!.name : displayName(contact!)
+      isGroupConv && message.speakerContactId ? speakerById.get(message.speakerContactId) : isGroupConv ? undefined : contact!
+    return speaker ? displayName(speaker) : isGroupConv ? (message.speakerContactId ? '未知角色' : group!.name) : displayName(contact!)
   }
 
   function previewForReply(message: Message): string {
@@ -245,7 +255,7 @@ export function ChatPage({ conversationIdOverride, embedded = false }: { convers
 
   function feedbackContactFor(message: Message): Contact | undefined {
     if (message.role !== 'assistant') return undefined
-    if (isGroupConv) return message.speakerContactId ? memberById.get(message.speakerContactId) : undefined
+    if (isGroupConv) return message.speakerContactId ? speakerById.get(message.speakerContactId) : undefined
     return contact ?? undefined
   }
 
@@ -340,11 +350,12 @@ export function ChatPage({ conversationIdOverride, embedded = false }: { convers
             }
           }
           if (isGroupConv) {
-            const speaker = message.speakerContactId ? memberById.get(message.speakerContactId) : undefined
+            const speaker = message.speakerContactId ? speakerById.get(message.speakerContactId) : undefined
+            const missingSpeaker = !!message.speakerContactId && !speaker
             return {
-              name: speaker ? displayName(speaker) : group!.name,
-              avatar: speaker?.avatar ?? group!.avatar,
-              avatarColor: speaker?.avatarColor ?? group!.avatarColor,
+              name: speaker ? displayName(speaker) : missingSpeaker ? '未知角色' : group!.name,
+              avatar: speaker?.avatar ?? (missingSpeaker ? '？' : group!.avatar),
+              avatarColor: speaker?.avatarColor ?? (missingSpeaker ? '#e5e7eb' : group!.avatarColor),
             }
           }
           return {
@@ -465,10 +476,11 @@ export function ChatPage({ conversationIdOverride, embedded = false }: { convers
       <div ref={scrollContainerRef} data-testid="chat-scroll" className="flex-1 overflow-y-auto pt-2" style={chatBackgroundStyle}>
         {messages.map((m, index) => {
           const speaker =
-            isGroupConv && m.role === 'assistant' && m.speakerContactId ? memberById.get(m.speakerContactId) : undefined
-          const bubbleName = isGroupConv ? (speaker ? displayName(speaker) : group!.name) : displayName(contact!)
-          const bubbleAvatar = isGroupConv ? (speaker ? speaker.avatar : group!.avatar) : contact!.avatar
-          const bubbleAvatarColor = isGroupConv ? (speaker ? speaker.avatarColor : group!.avatarColor) : contact!.avatarColor
+            isGroupConv && m.role === 'assistant' && m.speakerContactId ? speakerById.get(m.speakerContactId) : undefined
+          const missingSpeaker = isGroupConv && m.role === 'assistant' && !!m.speakerContactId && !speaker
+          const bubbleName = isGroupConv ? (speaker ? displayName(speaker) : missingSpeaker ? '未知角色' : group!.name) : displayName(contact!)
+          const bubbleAvatar = isGroupConv ? (speaker ? speaker.avatar : missingSpeaker ? '？' : group!.avatar) : contact!.avatar
+          const bubbleAvatarColor = isGroupConv ? (speaker ? speaker.avatarColor : missingSpeaker ? '#e5e7eb' : group!.avatarColor) : contact!.avatarColor
           const previousMessage = messages[index - 1]
           const showConversationTime = !previousMessage || m.createdAt - previousMessage.createdAt > 10 * 60 * 1000
           const msgBubble = (
@@ -483,7 +495,7 @@ export function ChatPage({ conversationIdOverride, embedded = false }: { convers
               contactAvatar={bubbleAvatar}
               contactAvatarColor={bubbleAvatarColor}
               userAvatar={settings.userAvatar}
-              mentionNames={(m.mentions ?? []).map((id) => memberById.get(id)).filter((c): c is Contact => !!c).map(displayName)}
+              mentionNames={(m.mentions ?? []).map((id) => speakerById.get(id)).filter((c): c is Contact => !!c).map(displayName)}
               replyPreview={m.replyToMessageId ? previewForReply(messageById.get(m.replyToMessageId) ?? m) : undefined}
               highlighted={flashId === m.id}
               selecting={selectingMessages}
@@ -503,14 +515,7 @@ export function ChatPage({ conversationIdOverride, embedded = false }: { convers
               <div key={`thought-${m.id}`}>
                 {msgBubble}
                 <div className="flex justify-start px-3">
-                  <div className="ml-10 max-w-[85%]">
-                    <div className="rounded-2xl rounded-tl-md border border-purple-200 bg-purple-50 px-3.5 py-2">
-                      <p className="text-[11px] leading-relaxed text-purple-600">
-                        <span className="font-medium">🔮 </span>
-                        {m.thought}
-                      </p>
-                    </div>
-                  </div>
+                  <div className="ml-10 max-w-[85%]"><ThoughtBubble thought={m.thought!} style={mindReadingStyle} /></div>
                 </div>
               </div>
             )

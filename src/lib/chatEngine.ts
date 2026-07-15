@@ -24,6 +24,7 @@ import { chatLivelinessRule } from './chatLiveliness'
 import { ensureWorldInitialized, resolveSchedule } from './world'
 import type { AiBubble, AppSettings, Contact, Message, MessageType, Sticker } from '../types'
 import { messagesForAiTurn, recentConversationMessages } from './conversationStats'
+import { waitForMessageReveal } from './messagePacing'
 
 /**
  * Per-conversation AI-turn state, deliberately kept in a module-level
@@ -77,7 +78,6 @@ export function isAnyChatTurnActive(): boolean {
 // Mood expiry is now a user-configurable setting (see ProactiveSettingsPage → mood settings).
 // The default is 30 min, stored in AppSettings.moodExpiryMs.
 const streamByConversation = new Map<string, string>()
-const timersByConversation = new Map<string, ReturnType<typeof setTimeout>[]>()
 const abortByConversation = new Map<string, AbortController>()
 
 function getActiveMood(contact: Contact, now: number): string | undefined {
@@ -87,8 +87,6 @@ function getActiveMood(contact: Contact, now: number): string | undefined {
 }
 
 function clearPending(conversationId: string) {
-  timersByConversation.get(conversationId)?.forEach(clearTimeout)
-  timersByConversation.set(conversationId, [])
   abortByConversation.get(conversationId)?.abort()
 }
 
@@ -389,7 +387,7 @@ async function runAiTurn(
     const situationText = `【当前情境】现在: ${describeCurrentTime(new Date())}。对方: ${buildUserProfileText(settings)}。${activeMood ? `你的心情: ${activeMood}。` : ''}【世界日程】${currentAuthoritativeSchedule ? `\n当前: ${currentAuthoritativeSchedule.activity}，地点=${currentAuthoritativeSchedule.locationId}` : '\n当前: 暂无安排'}${scheduleText ? `\n完整有效日程:\n${scheduleText}` : '\n完整有效日程: 暂无'}${activeUpcomingPlansText(contact, new Date()) ? `\n约定: ${activeUpcomingPlansText(contact, new Date())}` : ''}${recentEventsText ? `\n最近: ${recentEventsText}` : ''}`
     const contextSections = buildRawChatPrompt({
       name: contact.name,
-      persona: `${contact.systemPrompt}${customPersonalityTraitsLine(contact.customPersonalityTraits, contact.warmth ?? 0)}${isModuleEnabled('career') && contact.occupation ? `\n当前职业：${contact.occupation}，现实月薪：${contact.monthlySalary ?? 0}。工作会真实影响你的作息和日常话题。` : ''}${financeContext}`,
+      persona: `${contact.systemPrompt}${customPersonalityTraitsLine(contact.customPersonalityTraits)}${isModuleEnabled('career') && contact.occupation ? `\n当前职业：${contact.occupation}，现实月薪：${contact.monthlySalary ?? 0}。工作会真实影响你的作息和日常话题。` : ''}${financeContext}`,
       personaConstraints: contact.personaConstraints,
       personaProfile: contact.personaProfile,
       stylePrompt: settings.globalSystemPrompt,
@@ -397,7 +395,6 @@ async function runAiTurn(
       selfIterationContactText: isModuleEnabled('selfIteration') ? contact.selfIterationPrompt : undefined,
       relationshipBase: contact.relationshipBase || '朋友',
       personalityTrait: isModuleEnabled('personalityTraits') ? contact.personalityTrait : undefined,
-      personalityWarmth: undefined,
       worldviewText: worldbookText || undefined,
       latestUserText: _triggeringUserText,
       recentContext: [
@@ -596,6 +593,7 @@ async function runAiTurn(
       sourceEventId,
       logicContextText,
       assistantEvidenceIds,
+      controller.signal,
       turnStartedAt,
     )
   } catch (err) {
@@ -625,6 +623,7 @@ async function revealBubbles(
   sourceEventId?: string,
   logicContextText?: string,
   assistantEvidenceIds: string[] = [],
+  signal: AbortSignal = new AbortController().signal,
   turnStartedAt = performance.now(),
 ): Promise<void> {
   if (logicWorldVersion !== undefined) {
@@ -686,7 +685,7 @@ async function revealBubbles(
         debugAiTurnId: aiTurnId,
         debugParsedBubble: bubble,
         debugRawAiResponse: i === bubbles.length - 1 ? (finalRaw || '') : undefined,
-        thought: turnThought && i === bubbles.length - 1 ? turnThought : undefined,
+        thought: bubble.thought ?? (turnThought && i === bubbles.length - 1 ? turnThought : undefined),
         pending: true,
          createdAt: Date.now() + i,
        }
@@ -700,15 +699,17 @@ async function revealBubbles(
     useChatEngineStore.getState().patch(conversationId, { error: '结构动作未通过本地校验', aiTyping: false, typingLabel: undefined })
     return
   }
+  const firstMessage = preparedMessages[0]
   await db.transaction('rw', db.messages, db.conversations, async () => {
-    await db.messages.bulkAdd(preparedMessages)
-    await db.conversations.update(conversationId, { updatedAt: preparedMessages.at(-1)!.createdAt })
+    await db.messages.add(firstMessage)
+    await db.conversations.update(conversationId, { updatedAt: firstMessage.createdAt })
   })
   const visibleAt = performance.now()
-  useChatEngineStore.getState().patch(conversationId, { typingLabel: '正在同步状态' })
+  useChatEngineStore.getState().patch(conversationId, { typingLabel: displayName(contact) })
   const stateStartedAt = performance.now()
-  try {
-    await adjudicateStateChanges({
+  const revealedMessages = [firstMessage]
+  let revealBlocked = false
+  const stateTask = adjudicateStateChanges({
       scene: 'private_phone',
       conversationId,
       characterIds: [contact.id],
@@ -718,28 +719,52 @@ async function revealBubbles(
         ...preparedMessages.map((message) => ({ id: message.id, actorId: contact.id, actorName: displayName(contact), content: message.content, perceivedBy: [contact.id] })),
       ],
       trace: { turnId: streamId, stage: 'state', conversationId },
+    }).catch((error) => {
+      revealBlocked = true
+      throw error
     })
-    await Promise.all(preparedMessages.map((message) => db.messages.update(message.id, { pending: false })))
-  } catch (error) {
-    // A pending bubble is only a preview. If authoritative state cannot be
-    // committed, remove it so the visible conversation never claims a turn
-    // that the world model failed to finish.
-    await db.messages.bulkDelete(preparedMessages.map((message) => message.id))
-    await db.conversations.update(conversationId, { updatedAt: Date.now() })
-    throw error
+  const notifyMessage = (message: Message) => {
+    if (useChatUiStore.getState().activeConversationId === conversationId) return
+    useChatUiStore.getState().showNotification({
+      id: uuid(), conversationId, contactName: displayName(contact), contactAvatar: contact.avatar,
+      contactAvatarColor: contact.avatarColor, preview: previewForMessage(message),
+    })
   }
+  const revealTask = (async () => {
+    notifyMessage(firstMessage)
+    for (let index = 1; index < preparedMessages.length; index++) {
+      await waitForMessageReveal(preparedMessages[index - 1].content, signal)
+      if (revealBlocked) return false
+      if (signal.aborted || !isCurrentTurn(conversationId, streamId)) return false
+      const message = preparedMessages[index]
+      await db.transaction('rw', db.messages, db.conversations, async () => {
+        await db.messages.add(message)
+        await db.conversations.update(conversationId, { updatedAt: message.createdAt })
+      })
+      revealedMessages.push(message)
+      notifyMessage(message)
+    }
+    useChatEngineStore.getState().patch(conversationId, { typingLabel: undefined })
+    return true
+  })()
+  const [stateResult, revealResult] = await Promise.allSettled([stateTask, revealTask])
+  if (stateResult.status === 'rejected' || revealResult.status === 'rejected') {
+    // Pending bubbles are previews. If either parallel branch fails, remove
+    // everything from this turn so visible chat and authoritative state agree.
+    await db.messages.bulkDelete(revealedMessages.map((message) => message.id))
+    await db.conversations.update(conversationId, { updatedAt: Date.now() })
+    const failure = stateResult.status === 'rejected'
+      ? stateResult.reason
+      : revealResult.status === 'rejected' ? revealResult.reason : new Error('消息播放失败')
+    throw failure
+  }
+  await Promise.all(revealedMessages.map((message) => db.messages.update(message.id, { pending: false })))
+  if (!revealResult.value) return
   const unlockedAt = performance.now()
   console.info(`[回合耗时｜私聊] 首次显示=${Math.round(visibleAt - turnStartedAt)}ms；状态裁决与提交=${Math.round(unlockedAt - stateStartedAt)}ms；解锁=${Math.round(unlockedAt - turnStartedAt)}ms`)
   useChatEngineStore.getState().patch(conversationId, { aiTyping: false, typingLabel: undefined })
   if (streamByConversation.get(conversationId) === streamId) streamByConversation.delete(conversationId)
 
-  const lastMessage = preparedMessages.at(-1)!
-  if (useChatUiStore.getState().activeConversationId !== conversationId) {
-    useChatUiStore.getState().showNotification({
-      id: uuid(), conversationId, contactName: displayName(contact), contactAvatar: contact.avatar,
-      contactAvatarColor: contact.avatarColor, preview: previewForMessage(lastMessage),
-    })
-  }
   if (injectedIntentIds.length > 0) await markIntentsUsed(contact.id, injectedIntentIds)
   if (turnMood) {
     await db.contacts.update(contact.id, { mood: { text: turnMood, expiresAt: Date.now() + settings.moodExpiryMs } })

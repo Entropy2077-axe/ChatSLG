@@ -133,7 +133,7 @@ function buildMomentsPrompt(
               .filter((c) => c.willComment)
               .map(
                 (c, j) =>
-                  `  评论者${j + 1}: ${c.contact.name}\n  人设: ${c.contact.systemPrompt}\n  ${personalityTraitLine(c.contact.personalityTrait, c.contact.warmth ?? 0) || '性格特质: 无'}\n  说话样例: ${formatSpeechSamplesForScene(c.contact.speechSamples, 'moment', 1) || '无'}\n  与发布者的关系: ${c.relationLabel || '普通朋友'}；${c.relationContext}\n  最近可用素材: ${contexts.get(c.contact.id) || '无'}`,
+                  `  评论者${j + 1}: ${c.contact.name}\n  人设: ${c.contact.systemPrompt}\n  ${personalityTraitLine(c.contact.personalityTrait) || '性格特质: 无'}\n  说话样例: ${formatSpeechSamplesForScene(c.contact.speechSamples, 'moment', 1) || '无'}\n  与发布者的关系: ${c.relationLabel || '普通朋友'}；${c.relationContext}\n  最近可用素材: ${contexts.get(c.contact.id) || '无'}`,
               )
               .join('\n')
           : '  （这条没有人评论）'
@@ -142,7 +142,7 @@ function buildMomentsPrompt(
       const photoLine = e.willHavePhoto
         ? `这条动态会配一张照片 你还需要为它写一个"imageKeyword"(简短英文搜图短语 贴合你写的这条朋友圈内容 用来找一张对应的照片)\n`
         : ''
-      return `人物${i + 1}: ${e.poster.name}\n人设: ${e.poster.systemPrompt}\n${personalityTraitLine(e.poster.personalityTrait, e.poster.warmth ?? 0) || '性格特质: 无'}\n说话样例: ${formatSpeechSamplesForScene(e.poster.speechSamples, 'moment', 2) || '无'}\n当前心情: ${e.poster.mood?.text || '平静'}\n最近可用素材: ${contexts.get(e.poster.id) || '无'}\n${statusLine}${photoLine}这条朋友圈下会评论的人(按顺序):\n${commenterLines}`
+      return `人物${i + 1}: ${e.poster.name}\n人设: ${e.poster.systemPrompt}\n${personalityTraitLine(e.poster.personalityTrait) || '性格特质: 无'}\n说话样例: ${formatSpeechSamplesForScene(e.poster.speechSamples, 'moment', 2) || '无'}\n当前心情: ${e.poster.mood?.text || '平静'}\n最近可用素材: ${contexts.get(e.poster.id) || '无'}\n${statusLine}${photoLine}这条朋友圈下会评论的人(按顺序):\n${commenterLines}`
     })
     .join('\n\n')
 
@@ -381,11 +381,6 @@ export async function refreshMoments(settings: AppSettings): Promise<RefreshMome
   return { postedCount: entries.length }
 }
 
-/** How likely a contact is to react to the user's own moment — driven by warmth. */
-function userMomentReactionProbability(warmth: number): number {
-  return Math.min(0.9, Math.max(0.05, (warmth + 100) / 200))
-}
-
 interface UserMomentReactorPlan {
   contact: Contact
   willComment: boolean
@@ -394,7 +389,7 @@ interface UserMomentReactorPlan {
 function planUserMomentReactors(contacts: Contact[]): UserMomentReactorPlan[] {
   const plans: UserMomentReactorPlan[] = []
   for (const contact of contacts) {
-    if (Math.random() > userMomentReactionProbability(contact.warmth ?? 0)) continue
+    if (Math.random() > 0.5) continue
     plans.push({ contact, willComment: Math.random() < COMMENT_SHARE })
   }
   return plans
@@ -405,7 +400,7 @@ function buildUserMomentCommentPrompt(content: string, commenters: Contact[], wo
     .map((c, i) => {
       const scheduleLine = scheduleTexts.get(c.id) ?? ''
       const samples = formatSpeechSamplesForScene(c.speechSamples, 'moment', 1)
-      return `评论者${i + 1}: ${c.name} 人设: ${c.systemPrompt}\n${personalityTraitLine(c.personalityTrait, c.warmth ?? 0) || '性格特质: 无'}${samples ? `\n说话样例: ${samples}` : ''}${scheduleLine ? ` ${scheduleLine}` : ''}\n和用户的关系: ${c.relationshipBase || '朋友'} ${c.relationshipDynamic || ''} 好感度:${c.warmth ?? 0} 当前心情:${c.mood?.text || '平静'}\n最近素材: ${contexts.get(c.id) || '无'}`
+      return `评论者${i + 1}: ${c.name} 人设: ${c.systemPrompt}\n${personalityTraitLine(c.personalityTrait) || '性格特质: 无'}${samples ? `\n说话样例: ${samples}` : ''}${scheduleLine ? ` ${scheduleLine}` : ''}\n和用户的关系: ${c.relationshipBase || '朋友'} ${c.relationshipDynamic || ''} 当前心情:${c.mood?.text || '平静'}\n最近素材: ${contexts.get(c.id) || '无'}`
     })
     .join('\n')
   const worldviewSection = worldviewText ? `【这个世界的设定】\n${worldviewText}\n\n` : ''
@@ -563,9 +558,9 @@ function buildMomentReplyPrompt(
   const scheduleSection = scheduleLine ? `你${scheduleLine}(回复内容可以但不强制符合这个状态)\n` : ''
 
   const samples = formatSpeechSamplesForScene(poster.speechSamples, 'moment', 2)
-  return `${worldviewSection}你是${poster.name} 人设: ${poster.systemPrompt}\n${personalityTraitLine(poster.personalityTrait, poster.warmth ?? 0) || '性格特质: 无'}${customPersonalityTraitsLine(poster.customPersonalityTraits, poster.warmth ?? 0)}${samples ? `\n说话样例:\n${samples}` : ''}
+  return `${worldviewSection}你是${poster.name} 人设: ${poster.systemPrompt}\n${personalityTraitLine(poster.personalityTrait) || '性格特质: 无'}${customPersonalityTraitsLine(poster.customPersonalityTraits)}${samples ? `\n说话样例:\n${samples}` : ''}
 ${scheduleSection}
-你和用户的关系: ${poster.relationshipBase || '朋友'} ${poster.relationshipDynamic || ''} 好感度:${poster.warmth ?? 0} 当前心情:${poster.mood?.text || '平静'}
+你和用户的关系: ${poster.relationshipBase || '朋友'} ${poster.relationshipDynamic || ''} 当前心情:${poster.mood?.text || '平静'}
 最近可用素材: ${context || '无'}
 你发的这条朋友圈: "${momentContent}"
 

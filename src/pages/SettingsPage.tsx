@@ -24,6 +24,8 @@ export function SettingsPage() {
     pexelsApiKey,
     themeMode,
     animationsEnabled,
+    mindReadingEnabled,
+    mindReadingStyle,
     chatBackground,
     adminModeEnabled,
     topInsetAdjustmentPx,
@@ -193,6 +195,29 @@ export function SettingsPage() {
             ['lively', '热闹', '每轮 5–6 条'],
           ] as const).map(([value, label, detail]) => <button key={value} onClick={() => setSettings({ chatLiveliness: value })} className={`rounded-lg border px-2 py-2 text-left ${chatLiveliness === value ? 'border-violet-600 bg-violet-50 text-violet-700' : 'border-gray-200 text-gray-600'}`}><span className="block text-sm">{label}</span><span className="block text-[10px] opacity-70">{detail}</span></button>)}
         </div>
+      </section>
+
+      <section className="mt-3 bg-white">
+        <div className="flex items-center justify-between px-4 py-3.5">
+          <div><p className="text-sm text-gray-800">读心模式</p><p className="mt-0.5 text-[11px] text-gray-400">在角色消息下显示这句话对应的内心想法</p></div>
+          <button
+            type="button"
+            aria-label="切换读心模式"
+            onClick={() => setSettings({ mindReadingEnabled: !(mindReadingEnabled ?? true) })}
+            className={`relative h-6 w-11 shrink-0 rounded-full transition-colors ${(mindReadingEnabled ?? true) ? 'bg-violet-600' : 'bg-gray-200'}`}
+          >
+            <span className={`absolute top-0.5 left-0.5 h-5 w-5 rounded-full bg-white transition-transform ${(mindReadingEnabled ?? true) ? 'translate-x-5' : 'translate-x-0'}`} />
+          </button>
+        </div>
+        <button
+          type="button"
+          disabled={!(mindReadingEnabled ?? true)}
+          onClick={() => navigate('/settings/mind-reading')}
+          className="flex w-full items-center justify-between border-t border-gray-100 px-4 py-3.5 text-left disabled:opacity-40"
+        >
+          <div><p className="text-sm text-gray-800">读心卡片样式</p><p className="mt-0.5 text-[11px] text-gray-400">{({ narration: '低调旁白卡片', line: '细线独白', pill: '心声胶囊', reveal: '可展开心声' } as const)[mindReadingStyle ?? 'narration']}</p></div>
+          <span className="text-gray-300">›</span>
+        </button>
       </section>
 
       <section className="mt-3 bg-white px-4 py-3">

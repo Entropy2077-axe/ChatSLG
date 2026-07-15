@@ -114,20 +114,15 @@ export class ChatSLGDB extends Dexie {
     this.version(10).stores({
       commissions: null,
     })
-    // 5-dimension relationship → single warmth.
+    // Preserve the user's explicit relationship label from legacy records.
     this.version(11).upgrade(async (tx) => {
       const contacts = await tx.table('contacts').toArray()
       for (const c of contacts) {
-        const rel = (c as Record<string, unknown>).relationship as Record<string, number> | undefined
-        if (!rel || typeof rel.affection !== 'number') continue
-        const warmth = Math.round(rel.affection * 0.7 + (rel.familiarity ?? 0) * 0.3 - (rel.friction ?? 0) * 0.5 - 10)
-        const clamped = Math.max(-100, Math.min(100, warmth))
         const base =
           typeof (c as Record<string, unknown>).relationshipType === 'string'
             ? (c as Record<string, unknown>).relationshipType as string
             : '朋友'
         await tx.table('contacts').update(c.id, {
-          warmth: clamped,
           relationshipBase: base,
           relationshipDynamic: '',
         })
@@ -276,6 +271,26 @@ export class ChatSLGDB extends Dexie {
       for (const contact of contacts) {
         if (contact.defaultOutfit || !contact.id || !contact.outfit || typeof contact.outfit !== 'object') continue
         await tx.table('contacts').update(contact.id as string, { defaultOutfit: contact.outfit })
+      }
+    })
+    // Remove the retired numeric relationship score and normalize Nuwa's
+    // custom personality data to one plain name/meaning pair.
+    this.version(29).upgrade(async (tx) => {
+      for (const tableName of ['contacts', 'savedPersonas']) {
+        const table = tx.table(tableName)
+        const rows = await table.toArray() as Array<Record<string, unknown>>
+        for (const row of rows) {
+          delete row.warmth
+          const traits = Array.isArray(row.customPersonalityTraits)
+            ? row.customPersonalityTraits as Array<Record<string, unknown>>
+            : []
+          row.customPersonalityTraits = traits.slice(0, 1).map((trait) => ({
+            id: typeof trait.id === 'string' ? trait.id : crypto.randomUUID(),
+            name: typeof trait.name === 'string' ? trait.name : '',
+            meaning: typeof trait.meaning === 'string' ? trait.meaning : '',
+          })).filter((trait) => trait.name || trait.meaning)
+          await table.put(row)
+        }
       }
     })
   }

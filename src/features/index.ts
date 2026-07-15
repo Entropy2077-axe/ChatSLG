@@ -5,7 +5,6 @@ const RETIRED_FEATURES = new Set([
   'proactiveChat',
   'lifeSimulation',
   'selfIteration',
-  'mindReading',
   // Experimental pre-draft outlining adds a full model call to every group
   // turn. The main group prompt already contains the same planning contract;
   // keep the implementation available for future opt-in experiments, but do

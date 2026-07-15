@@ -44,7 +44,6 @@ function buildMemoryUpdatePrompt(opts: {
   existingFacts: string
   existingStyle: string
   existingPlansText: string
-  warmth: number // legacy caller field; ignored by ChatSLG
   currentTimeText: string
 }): string {
   return `你是对话记忆整理器 输出JSON 不要有其他任何文字
@@ -199,7 +198,6 @@ interface MemoryUpdateResult {
   style: string
   styleConfidence: number
   plans: ParsedPlan[]
-  warmthDelta: number
   relationshipAssessment: string
   relationshipConfidence: number
   intents: ParsedIntent[]
@@ -212,10 +210,8 @@ export interface MemoryUpdateDebug {
   styleUpdated: boolean
   addedPlans: PlanItem[]
   addedIntents: IntentItem[]
-  warmthDelta: number
   relationshipAssessment: string
   relationshipConfidence: number
-  relationshipBaseChanged: boolean
 }
 
 function parseMemoryResponse(raw: string): MemoryUpdateResult | null {
@@ -236,7 +232,6 @@ function parseMemoryResponse(raw: string): MemoryUpdateResult | null {
         style: parsed.style.trim().slice(0, 300),
         styleConfidence: Number.isFinite(styleConfidence) ? Math.max(0, Math.min(100, Math.round(styleConfidence))) : 0,
         plans: parsePlansField(parsed.plans, true),
-        warmthDelta: 0,
         relationshipAssessment: assessment.slice(0, 80),
         relationshipConfidence: Number.isFinite(relationshipConfidence)
           ? Math.max(0, Math.min(100, Math.round(relationshipConfidence)))
@@ -465,7 +460,7 @@ function newIntentItems(existing: IntentItem[], newOnes: ParsedIntent[], now: nu
 /**
  * Fire-and-forget: if enough new messages have piled up, summarize them into
  * compact facts/style memory and optionally re-assess the descriptive
- * relationship state. Numeric affection is deliberately not updated.
+ * relationship state.
  */
 export async function maybeUpdateMemory(
   contactId: string,
@@ -510,7 +505,6 @@ async function updateMemory(
             existingFacts: contact.memoryFacts,
             existingStyle: contact.memoryStyle,
             existingPlansText: activeUpcomingPlansText(contact, new Date()),
-            warmth: contact.warmth ?? 0,
             currentTimeText: describeCurrentTime(new Date()),
           })}`,
         },
@@ -530,9 +524,6 @@ async function updateMemory(
     const dynamic = relationshipHighConfidence
       ? (updated.relationshipAssessment || contact.relationshipDynamic)
       : contact.relationshipDynamic
-    const warmthDelta = 0
-    const relationshipBaseChanged = false
-
     const factsUpdated = updated.factConfidence >= MEMORY_CONFIDENCE_THRESHOLD && updated.facts !== contact.memoryFacts
     const styleUpdated = updated.styleConfidence >= MEMORY_CONFIDENCE_THRESHOLD && updated.style !== contact.memoryStyle
     const addedPlans = newPlanItems(updated.plans, now)
@@ -574,10 +565,8 @@ async function updateMemory(
       styleUpdated,
       addedPlans,
       addedIntents,
-      warmthDelta,
       relationshipAssessment: dynamic,
       relationshipConfidence: updated.relationshipConfidence,
-      relationshipBaseChanged,
     }
   } catch {
     // best-effort only
@@ -867,7 +856,7 @@ function attachRelatedContactIds(items: ParsedMemoryItem[], memberByName: Map<st
   })
 }
 
-/** Group-chat memory — no warmth scoring (intentional: group dynamics are too complex for a single score). */
+/** Group-chat memory uses descriptive relationship context rather than numeric scoring. */
 export async function maybeUpdateGroupMemory(
   groupId: string,
   conversationId: string,

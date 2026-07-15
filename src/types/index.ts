@@ -1,4 +1,3 @@
-/** Single-dimension warmth model, -100 (hostile) to +100 (bonded) — see lib/relationship.ts. */
 export interface Contact {
   id: string
   name: string // the persona's own name, chosen by the AI at creation time — not user-renameable
@@ -23,13 +22,10 @@ export interface Contact {
   memoryStyle: string // compact notes on how tone/familiarity should adapt to this user over time
   memoryUpdatedAt: number
   memoryMessageCursor: number // number of messages already folded into memory, so updates only look at what's new
-  // ---- relationship (single-dimension warmth, -100 hostile ~ +100 bonded) ----
-  /** Absent until the 好感度 module is enabled and the first evaluation runs, or a personality trait with an initial value is assigned. */
-  warmth?: number
   relationshipBase: string // label the user picked at creation: 恋人/朋友/家人/... — only changes by explicit user action or explicit model assessment (e.g. "已经分手了")
   relationshipDynamic: string // short natural-language summary of what the relationship currently feels like, updated by the utility model on every memory update
-  personalityTrait?: string // 病娇/天然呆/傲娇/无. Affects warmth change rate via traitWarmthModifier; missing/无 = normal.
-  /** Short-term emotional state, assessed by the model each turn. Expires after ~30 min. Separate from warmth (long-term relationship). */
+  personalityTrait?: string // 病娇/天然呆/傲娇/无. A stable behavioral and speaking-style anchor.
+  /** Short-term emotional state, assessed by the model each turn. Expires after ~30 min. */
   mood?: {
     text: string
     expiresAt: number
@@ -139,7 +135,7 @@ export const CONTACT_RELATION_LABELS = [
 export type ContactRelationLabel = (typeof CONTACT_RELATION_LABELS)[number] | (string & {})
 
 export const PERSONALITY_TRAIT_OPTIONS = [
-  { value: '病娇', description: '初始好感100且无上限 好感只升不降 被温暖双倍心动 极度占有' },
+  { value: '病娇', description: '依恋强烈 极度占有 容易因对方与别人亲近而不安' },
   { value: '天然呆', description: '反应慢半拍 单纯 情绪变化缓慢 不太会读空气' },
   { value: '傲娇', description: '口是心非 越在意越表现得冷淡 防御心强 不擅长坦率' },
   { value: '高冷', description: '冷淡疏离 不轻易被打动 熟了之后才会放下防备' },
@@ -148,14 +144,14 @@ export const PERSONALITY_TRAIT_OPTIONS = [
   { value: '妹控', description: '对妹妹系的人天然亲近 其他人较难打开心扉' },
   { value: '兄控', description: '对兄长系的人天然亲近 其他人较难打开心扉' },
   { value: '雌小鬼', description: '表面嘲讽捉弄 来拒去留 嘴上不饶人心里怕被丢下' },
-  { value: '妈妈', description: '无底线包容 好感度永远不会下降 初始好感度固定为75' },
+  { value: '妈妈', description: '包容照顾型 会主动关心生活细节 但仍保留合理边界' },
   { value: '猫系', description: '尊重边界才会亲近 熟了以后嘴硬但黏人' },
   { value: '犬系', description: '热情直球 忠诚爱分享 被回应会特别开心' },
   { value: '爱哭包', description: '情绪外显 容易委屈 被安慰会迅速心软' },
   { value: '撒娇怪', description: '用撒娇索取关注 被回应会更亲近 被忽略会委屈' },
   { value: '小天使', description: '温柔治愈 善于原谅 但仍有自己的边界' },
   { value: '爹系', description: '可靠照顾型 会提醒护短 不以控制代替关心' },
-  { value: '三无', description: '低反应少话 高好感后用行动和细节偏爱表达亲近' },
+  { value: '三无', description: '低反应少话 更习惯用行动和细节表达在意' },
   { value: '机器人', description: '理性精确 情绪表达迟缓 会逐渐学习关心' },
   { value: '社恐', description: '陌生时紧张克制 熟悉后才会主动分享和依赖' },
   { value: '吃货', description: '以美食和投喂作为日常亲近媒介 不强行聊吃' },
@@ -451,7 +447,7 @@ export interface AppSettings {
   apiKey: string
   baseUrl: string
   model: string
-  utilityModel: string // model for secondary tasks: shop generation, warmth scoring / memory updates, worldview drafts, etc.
+  utilityModel: string // model for secondary tasks: shop generation, memory updates, worldview drafts, etc.
   globalSystemPrompt: string
   /** Controls the total number of ordinary AI bubbles per user turn. */
   chatLiveliness?: 'quiet' | 'normal' | 'lively'
@@ -495,6 +491,8 @@ export interface AppSettings {
   currencyIconMode?: 'coin' | 'emoji' | 'yen' | 'dollar'
   customCurrencyEmoji?: string
   animationsEnabled?: boolean
+  mindReadingEnabled?: boolean
+  mindReadingStyle?: 'narration' | 'line' | 'pill' | 'reveal'
   /** How long an AI mood lasts before expiring (ms). Default 30 min. */
   moodExpiryMs: number
   /** Shared output of the self-iteration learner: expression habits plus decontextualized user boundaries/preferences. */
@@ -833,12 +831,14 @@ export interface PendingPhoneMessage {
 export interface AiBubbleText {
   type: 'text'
   content: string
+  thought?: string
 }
 export interface AiBubbleLink {
   type: 'link'
   app: string
   label: string
   data?: Record<string, unknown>
+  thought?: string
 }
 /** Emitted when the AI agrees to (or itself proposes) a one-off exception to its normal schedule — the negotiation itself happens in plain text bubbles beforehand; this is just the structured record of what was agreed. 1:1 only, not supported in the (deliberately simpler) group chat protocol. */
 export interface AiBubbleScheduleChange {
@@ -856,6 +856,7 @@ export interface AiBubbleScheduleChange {
   priority: 'override' | 'commitment'
   reason: string
   accepted?: boolean
+  thought?: string
 }
 export interface AiBubbleFinance {
   type: 'transfer' | 'redPacket' | 'loanRequest' | 'loanDecision' | 'giftPurchase'
@@ -866,6 +867,7 @@ export interface AiBubbleFinance {
   name?: string
   icon?: string
   description?: string
+  thought?: string
 }
 
 export interface WorldbookEntry {
@@ -938,20 +940,10 @@ export interface AiUsageRecord {
   finishReason?: string
 }
 
-export interface CustomWarmthRule {
-  id: string
-  minWarmth: number
-  maxWarmth: number
-  positiveMultiplier: number
-  negativeMultiplier: number
-  prompt: string
-}
-
 export interface CustomPersonalityTrait {
   id: string
   name: string
   meaning: string
-  rules: CustomWarmthRule[]
 }
 
 export interface ContactCreatorProfile {
@@ -988,8 +980,8 @@ export interface AiResponse {
   messages: AiBubble[]
   /** Short emotional-state summary the model assesses about itself this turn. Required. */
   mood: string
-  /** Private thought — what the AI really thinks vs what it says. Required. */
-  thought: string
+  /** Legacy whole-turn thought. New responses store a separate thought on every message. */
+  thought?: string
   outfitChange?: OutfitChangeProposal
   locationChange?: LocationChangeProposal
 }

@@ -26,7 +26,7 @@ async function seedBackupFixture(page: Page) {
       memoryStyle: '',
       memoryUpdatedAt: 0,
       memoryMessageCursor: 0,
-      warmth: 15, relationshipBase: '朋友', relationshipDynamic: '',
+      relationshipBase: '朋友', relationshipDynamic: '',
     })
     await db.conversations.add({
       id: 'conversation-backup',
@@ -66,7 +66,7 @@ async function seedSearchAndGroupFixture(page: Page) {
       memoryStyle: '',
       memoryUpdatedAt: 0,
       memoryMessageCursor: 0,
-      warmth: 15, relationshipBase: '朋友', relationshipDynamic: '',
+      relationshipBase: '朋友', relationshipDynamic: '',
     }
     await db.contacts.bulkAdd([
       { ...baseContact, id: 'contact-a', name: 'Alice Search' },
@@ -364,7 +364,7 @@ test('appearance settings enable dark mode and custom chat background', async ({
       memoryStyle: '',
       memoryUpdatedAt: 0,
       memoryMessageCursor: 0,
-      warmth: 0, relationshipBase: '朋友', relationshipDynamic: '',
+      relationshipBase: '朋友', relationshipDynamic: '',
     })
     await db.conversations.add({ id: 'conversation-bg', contactId: 'contact-bg', pinned: false, createdAt: 1, updatedAt: 1 })
   })
@@ -450,18 +450,6 @@ test('worldbook retrieval keeps permanent entries and ranks keyword matches', as
   expect(result).toEqual(['always', 'magic'])
 })
 
-test('custom traits multiply matching warmth rules with a safe cap', async ({ page }) => {
-  await page.goto('/#/')
-  const result = await page.evaluate(async () => {
-    const { customTraitWarmthModifier } = await import('/src/lib/relationship.ts')
-    return customTraitWarmthModifier([
-      { id: 'a', name: 'A', meaning: 'A', rules: [{ id: 'a1', minWarmth: 0, maxWarmth: 50, positiveMultiplier: 2, negativeMultiplier: 0.5, prompt: '' }] },
-      { id: 'b', name: 'B', meaning: 'B', rules: [{ id: 'b1', minWarmth: 10, maxWarmth: 30, positiveMultiplier: 3, negativeMultiplier: 2, prompt: '' }] },
-    ], 2, 20)
-  })
-  expect(result).toBe(12)
-})
-
 test('top inset adjustment shortens the shell while keeping its bottom fixed', async ({ page }) => {
   await page.goto('/#/settings')
   const shell = page.locator('.app-shell')
@@ -485,6 +473,29 @@ test('nuwa mode replaces preset creator fields with free-form fields', async ({ 
   await expect(page.getByRole('button', { name: '🎲 完全随机创建' })).toHaveCount(0)
   await expect(page.getByRole('button', { name: '18-22' })).toHaveCount(0)
   await expect(page.getByRole('button', { name: '恋人', exact: true })).toHaveCount(0)
+  await expect(page.getByText('自定义性格特质（最多一个）')).toBeVisible()
+  await expect(page.getByPlaceholder('特质名称')).toHaveCount(1)
+  await expect(page.getByPlaceholder('特质含义与行为表现')).toHaveCount(1)
+  await expect(page.getByText('添加区间规则')).toHaveCount(0)
+  await expect(page.getByText('上升倍率')).toHaveCount(0)
+})
+
+test('mind-reading settings expose a gated style submenu with four previews', async ({ page }) => {
+  await page.goto('/#/settings')
+  const toggle = page.getByLabel('切换读心模式')
+  await expect(toggle).toBeVisible()
+  const styleMenu = page.getByRole('button', { name: /读心卡片样式/ })
+  await toggle.click()
+  await expect(styleMenu).toBeDisabled()
+  await toggle.click()
+  await styleMenu.click()
+  await expect(page).toHaveURL(/#\/settings\/mind-reading$/)
+  await expect(page.getByText('低调旁白卡片')).toBeVisible()
+  await expect(page.getByText('细线独白')).toBeVisible()
+  await expect(page.getByText('心声胶囊')).toBeVisible()
+  await expect(page.getByText('可展开心声')).toBeVisible()
+  await expect(page.getByText('其实一直在等你，只是不好意思直接说。')).toHaveCount(3)
+  await expect(page.getByRole('button', { name: '查看想法', exact: true })).toHaveCount(1)
 })
 
 test('life simulation catches up local state after elapsed time without an API key', async ({ page }) => {
@@ -639,20 +650,4 @@ test('contact creation queue keeps running off-page and automatically saves the 
   await expect(page).toHaveURL(/#\/phone$/)
   await page.getByText('联系人', { exact: true }).click()
   await expect(page.getByText('队列角色', { exact: true })).toBeVisible()
-})
-
-test.skip('relationship deltas are rule based and prompt includes human style rules', async ({ page }) => {
-  await page.goto('/#/')
-  const result = await page.evaluate(async () => {
-    const { inferRelationshipDeltaFromTurn } = await import('/src/lib/relationship.ts')
-    const { DEFAULT_STYLE_PROMPT } = await import('/src/lib/prompt.ts')
-    return {
-      delta: inferRelationshipDeltaFromTurn('谢谢你 我有点难过 想抱抱', [{ type: 'text', content: '过来' }]),
-      prompt: DEFAULT_STYLE_PROMPT,
-    }
-  })
-  expect(result.delta.affection).toBeGreaterThan(0)
-  expect(result.delta.trust).toBeGreaterThan(0)
-  expect(result.prompt).toContain('先有情绪反应')
-  expect(result.prompt).toContain('不要用"我可以帮你')
 })

@@ -68,7 +68,6 @@ export function ContactCardPage() {
   const [pickingAvatar, setPickingAvatar] = useState(false)
   const [pickingRelationshipType, setPickingRelationshipType] = useState(false)
   const [pickingPersonalityTrait, setPickingPersonalityTrait] = useState(false)
-  const relEnabled = useModuleEnabled('relationship')
   const personalityEnabled = useModuleEnabled('personalityTraits')
   const adminEnabled = useSettingsStore((s) => s.adminModeEnabled)
   const moodEnabled = true
@@ -259,15 +258,10 @@ export function ContactCardPage() {
         selfIterationGlobalText: isModuleEnabled('selfIteration') ? settings.selfIterationGlobalPrompt : undefined,
         selfIterationContactText: isModuleEnabled('selfIteration') ? contact.selfIterationPrompt : undefined,
         personalityTrait: personalityEnabled ? contact.personalityTrait : undefined,
-        personalityWarmth: relEnabled ? (contact.warmth ?? 0) : undefined,
         worldviewText: isModuleEnabled('worldview') ? '【运行时按当前对话检索世界书条目；此预览不固定命中结果】' : undefined,
         latestUserText: '【预览】这里会放入用户本轮最新消息',
         recentContext: [
-          `【你和对方的关系】${relationshipLine(
-            relEnabled ? (contact.relationshipBase || '朋友') : '朋友',
-            relEnabled ? (contact.relationshipDynamic || '') : '',
-            relEnabled ? (contact.warmth ?? 0) : 0,
-          )}`,
+          `【你和对方的关系】${relationshipLine(contact.relationshipBase || '朋友', contact.relationshipDynamic || '')}`,
           `【你对TA的了解】${contact.memoryFacts || '（刚开始聊）'}`,
           `【相处习惯】${contact.memoryStyle || '（还没有形成习惯）'}`,
           `【当前情境】现在: ${describeCurrentTime(now)}。对方: ${buildUserProfileText(settings)}。${contact.mood?.text ? `你的心情: ${contact.mood.text}。` : ''}【日程】${describeCurrentSchedule(contact, now) ? `\n当前: ${describeCurrentSchedule(contact, now)}` : '\n当前: 暂无安排'}${describeUpcomingScheduleText(contact, now) ? `\n接下来:\n${describeUpcomingScheduleText(contact, now)}` : '\n接下来: 暂无安排'}${activeUpcomingPlansText(contact, now) ? `\n约定: ${activeUpcomingPlansText(contact, now)}` : ''}${pendingEvents.length > 0 ? `\n最近: ${pendingEvents.join('；')}` : ''}`,

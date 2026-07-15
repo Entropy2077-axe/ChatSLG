@@ -47,6 +47,8 @@ export const useSettingsStore = create<SettingsState>()(
       chatBackground: '',
       currencyIconMode: 'coin',
       animationsEnabled: true,
+      mindReadingEnabled: true,
+      mindReadingStyle: 'narration',
       customCurrencyEmoji: '💎',
       moodExpiryMs: 30 * 60 * 1000,
       selfIterationGlobalPrompt: '',
@@ -56,7 +58,7 @@ export const useSettingsStore = create<SettingsState>()(
     }),
     {
       name: 'chatslg-settings',
-      version: 10,
+      version: 11,
       migrate: (persisted, version) => {
         const next = persisted as Partial<SettingsState>
         if (typeof next.userOccupation !== 'string') next.userOccupation = ''
@@ -69,6 +71,8 @@ export const useSettingsStore = create<SettingsState>()(
         if (typeof next.worldbookMigrationCompleted !== 'boolean') next.worldbookMigrationCompleted = false
         if (typeof next.automaticAiDailyCap !== 'number') next.automaticAiDailyCap = 0
         if (typeof next.animationsEnabled !== 'boolean') next.animationsEnabled = true
+        if (typeof next.mindReadingEnabled !== 'boolean') next.mindReadingEnabled = true
+        if (!['narration', 'line', 'pill', 'reveal'].includes(String(next.mindReadingStyle))) next.mindReadingStyle = 'narration'
         if (version < 9) {
           next.contactCreatorMode = 'standard'
           delete (next as Record<string, unknown>).enabledModules

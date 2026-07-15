@@ -11,14 +11,8 @@ import { MOOD_EMOJIS, normalizeMood } from './mood'
 /** Group chats can cap how many members answer per turn; see pickSpeakers. */
 const DEFAULT_GROUP_SPEAKER_LIMIT: GroupSpeakerLimit = 3
 
-/** Warmer contacts get picked to speak more often (also reused by proactiveChat.ts). */
-export function relationshipWeight(warmth: number): number {
-  if (!isModuleEnabled('relationship')) return 1 // uniform when 好感度 disabled
-  return Math.max(1, (warmth + 100) / 2)
-}
-
 export function weightedSampleWithoutReplacement(contacts: Contact[], k: number): Contact[] {
-  const pool = contacts.map((c) => ({ c, w: relationshipWeight(c.warmth ?? 0) }))
+  const pool = contacts.map((c) => ({ c, w: 1 }))
   const picked: Contact[] = []
   while (picked.length < k && pool.length > 0) {
     const total = pool.reduce((sum, p) => sum + p.w, 0)
@@ -125,7 +119,7 @@ export function buildGroupSystemPrompt(opts: {
       const trait = c.personalityTrait?.trim()
       const traitLine =
         isModuleEnabled('personalityTraits') && trait && trait !== '无'
-          ? `${personalityTraitLine(trait, c.warmth ?? 0)}${customPersonalityTraitsLine(c.customPersonalityTraits, c.warmth ?? 0)}`
+          ? `${personalityTraitLine(trait)}${customPersonalityTraitsLine(c.customPersonalityTraits)}`
           : ''
       const samplesLine = formatSpeechSamplesForScene(c.speechSamples, 'group', 2)
       const recentMemoText = opts.speakerMemoriesMap?.get(c.id)
@@ -229,7 +223,7 @@ export function buildGroupRawChatPrompt(opts: {
 ${plansText ? `- 和用户的约定: ${plansText}。\n` : ''}${recentMemoText ? `- 最近记忆碎片:\n${recentMemoText}\n` : ''}${c.selfIterationPrompt ? `- 关系协商记录:\n${c.selfIterationPrompt}\n` : ''}
 感觉:
 - 人设必须严格遵守: ${c.systemPrompt || '自由发挥成一个普通朋友'}。${isModuleEnabled('career') && c.occupation ? `职业：${c.occupation}，月薪${c.monthlySalary ?? 0}。` : ''}${c.personaConstraints ? `\n- 用户补充说明（不可违背）: ${c.personaConstraints}` : ''}${c.personaProfile ? `\n- 人设硬约束:\n${formatPersonaProfile(c.personaProfile)}` : ''}
-${c.mbti ? `- MBTI: ${c.mbti}。` : ''}${personalityTraitLine(c.personalityTrait, c.warmth ?? 0)}${customPersonalityTraitsLine(c.customPersonalityTraits, c.warmth ?? 0)}
+${c.mbti ? `- MBTI: ${c.mbti}。` : ''}${personalityTraitLine(c.personalityTrait)}${customPersonalityTraitsLine(c.customPersonalityTraits)}
 ${samplesText ? `- 说话样例:\n${samplesText}` : ''}`
     })
     .join('\n\n')
@@ -377,11 +371,8 @@ export async function pickSociallyConnectedSpeakers(
   }
   const choose = (pool: Contact[]) => {
     const weighted = pool.map((contact) => {
-      const userWeight = relationshipWeight(contact.warmth ?? 0)
       const social = picked.length === 0 ? 0 : picked.reduce((sum, other) => sum + relationScore(contact.id, other.id) + relationScore(other.id, contact.id), 0) / (picked.length * 2)
-      // Keep every member viable: social affinity enhances relevance but never
-      // converts low warmth into a permanent mute button.
-      return { c: contact, w: Math.max(1, userWeight * (1 + Math.max(-0.45, Math.min(0.8, social / 160)))) }
+      return { c: contact, w: Math.max(1, 1 + Math.max(-0.45, Math.min(0.8, social / 160))) }
     })
     const total = weighted.reduce((sum, entry) => sum + entry.w, 0)
     let roll = Math.random() * total

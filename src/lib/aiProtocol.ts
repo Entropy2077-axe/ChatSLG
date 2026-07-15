@@ -70,18 +70,21 @@ function tryParseJson(trimmedRaw: string): ParsedAiTurn | null {
   const bubbles: AiBubble[] = []
   for (const m of parsed.messages) {
     if (!m || typeof m !== 'object') continue
+    const messageThought = typeof (m as { thought?: unknown }).thought === 'string'
+      ? (m as { thought: string }).thought.trim().slice(0, 100) || undefined
+      : undefined
     if (m.type === 'text') {
       const content = parseTextBubbleContent(m as unknown as Record<string, unknown>)
-      if (content) bubbles.push({ type: 'text', content })
+      if (content) bubbles.push({ type: 'text', content, thought: messageThought })
     } else if (m.type === 'link' && typeof m.app === 'string' && typeof m.label === 'string') {
-      bubbles.push({ type: 'link', app: m.app, label: m.label, data: m.data })
+      bubbles.push({ type: 'link', app: m.app, label: m.label, data: m.data, thought: messageThought })
     } else if (m.type === 'scheduleChange') {
       const scheduleChange = parseScheduleChangeBubble(m as unknown as Record<string, unknown>)
-      if (scheduleChange) bubbles.push(scheduleChange)
+      if (scheduleChange) bubbles.push({ ...scheduleChange, thought: messageThought })
     } else if (['transfer','redPacket','loanRequest','loanDecision','giftPurchase'].includes(String(m.type))) {
       const fm = m as unknown as Record<string, unknown>
       const amount = Math.round(Number(fm.amount))
-      if (Number.isFinite(amount) && amount > 0) bubbles.push({ type: m.type as 'transfer'|'redPacket'|'loanRequest'|'loanDecision'|'giftPurchase', amount, note: typeof fm.note === 'string' ? String(fm.note).slice(0,80) : undefined, loanId: typeof fm.loanId === 'string' ? String(fm.loanId) : undefined, decision: fm.decision === 'accept' ? 'accept' : fm.decision === 'reject' ? 'reject' : undefined, name: typeof fm.name === 'string' ? String(fm.name).slice(0,30) : undefined, icon: typeof fm.icon === 'string' ? String(fm.icon).slice(0,8) : undefined, description: typeof fm.description === 'string' ? String(fm.description).slice(0,80) : undefined })
+      if (Number.isFinite(amount) && amount > 0) bubbles.push({ type: m.type as 'transfer'|'redPacket'|'loanRequest'|'loanDecision'|'giftPurchase', amount, note: typeof fm.note === 'string' ? String(fm.note).slice(0,80) : undefined, loanId: typeof fm.loanId === 'string' ? String(fm.loanId) : undefined, decision: fm.decision === 'accept' ? 'accept' : fm.decision === 'reject' ? 'reject' : undefined, name: typeof fm.name === 'string' ? String(fm.name).slice(0,30) : undefined, icon: typeof fm.icon === 'string' ? String(fm.icon).slice(0,8) : undefined, description: typeof fm.description === 'string' ? String(fm.description).slice(0,80) : undefined, thought: messageThought })
     }
   }
   const mood = typeof parsed.mood === 'string' && parsed.mood.trim() ? normalizeMood(parsed.mood) : undefined
@@ -120,33 +123,45 @@ function parseFinanceMarker(line: string): AiBubble | null {
  * avoiding a second paid model call whose only job was mechanical JSON. */
 export function parseRawPrivateDraft(raw: string, fallbackMood: string = '😌'): ParsedAiTurn {
   const moodMatch = raw.match(/<mood>\s*([^<]+?)\s*<\/mood>/i)
-  const thoughtMatch = raw.match(/<thought>\s*([\s\S]*?)\s*<\/thought>/i)
   const body = raw
     .replace(/<mood>[\s\S]*?<\/mood>/gi, '')
-    .replace(/<thought>[\s\S]*?<\/thought>/gi, '')
     .trim()
   const bubbles: AiBubble[] = []
+  let legacyTurnThought: string | undefined
   for (const sourceLine of body.split(/\r?\n/)) {
     let line = sourceLine.trim().replace(/^[-•]\s*/, '')
     if (!line) continue
+    const thoughtMatch = line.match(/<thought>\s*([\s\S]*?)\s*<\/thought>/i)
+    const thought = thoughtMatch?.[1]?.trim().slice(0, 100)
+    line = line.replace(/<thought>[\s\S]*?<\/thought>/gi, '').trim()
+    if (!line) {
+      if (thought) legacyTurnThought = thought
+      continue
+    }
     if ((line.startsWith('“') && line.endsWith('”')) || (line.startsWith('"') && line.endsWith('"'))) {
       line = line.slice(1, -1).trim()
     }
     if (!line) continue
     const finance = parseFinanceMarker(line)
-    if (finance) bubbles.push(finance)
-    else bubbles.push({ type: 'text', content: line })
+    if (finance) bubbles.push({ ...finance, thought })
+    else bubbles.push({ type: 'text', content: line, thought })
   }
   return {
     bubbles,
     knowledgeQueries: [],
     mood: normalizeMood(moodMatch?.[1], normalizeMood(fallbackMood)),
-    thought: thoughtMatch?.[1]?.trim().slice(0, 100),
+    thought: legacyTurnThought ?? bubbles.at(-1)?.thought,
   }
 }
 
 export function rawPrivateDraftNeedsUtility(raw: string, latestUserText: string): boolean {
-  if (!/<mood>[\s\S]*?<\/mood>/i.test(raw) || !/<thought>[\s\S]*?<\/thought>/i.test(raw)) return true
+  if (!/<mood>[\s\S]*?<\/mood>/i.test(raw)) return true
+  const messageLines = raw
+    .replace(/<mood>[\s\S]*?<\/mood>/gi, '')
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+  if (messageLines.length === 0 || messageLines.some((line) => !/<thought>[\s\S]*?<\/thought>/i.test(line))) return true
   void latestUserText
   return /\[(?:transfer|redPacket|loanRequest|loanDecision|giftPurchase):/i.test(raw)
 }
