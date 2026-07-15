@@ -12,8 +12,8 @@ const COLORS: Record<string, string> = { log: 'text-gray-600', info: 'text-blue-
 const PAGE = 50
 const TRACE_PAGE = 20
 const EMPTY_TRACES: AdminAiTrace[] = []
-const STAGE_ORDER: AdminAiTraceStage[] = ['first_chat', 'first_quality', 'second_chat', 'other', 'second_quality']
-const STAGE_LABEL: Record<AdminAiTraceStage, string> = { first_chat: '第一次 Chat', first_quality: '第一次审核', second_chat: '第二次 Chat', other: 'Other 转换', second_quality: '第二次审核' }
+const STAGE_ORDER: AdminAiTraceStage[] = ['first_chat', 'other', 'first_quality', 'second_chat', 'second_quality', 'state']
+const STAGE_LABEL: Record<AdminAiTraceStage, string> = { first_chat: '第一次 Chat', first_quality: '第一次逻辑审核', second_chat: '第二次 Chat', other: '格式转换', second_quality: '第二次逻辑审核', state: '状态裁决' }
 
 interface TraceTurn { id: string; traces: AdminAiTrace[]; createdAt: number; conversationId?: string; legacy: boolean }
 
@@ -83,7 +83,7 @@ function TraceStep({ trace, index }: { trace: AdminAiTrace; index: number }) {
     {result.reason && <p className="mb-2 rounded bg-white/80 p-2 text-[11px] text-gray-600">审核原因：{result.reason}</p>}
     <details open={trace.stage === 'first_chat' || !trace.stage}><summary className="cursor-pointer text-[11px] text-gray-500">输入消息 / Prompt</summary><pre className="mt-1 max-h-72 overflow-auto whitespace-pre-wrap rounded bg-white p-2 text-[11px]">{trace.messages.map((message) => `[${message.role}]\n${message.content}`).join('\n\n')}</pre></details>
     <details open><summary className="cursor-pointer text-[11px] text-gray-500">{trace.error ? '错误' : '模型输出'}</summary><pre className={`mt-1 max-h-72 overflow-auto whitespace-pre-wrap rounded p-2 text-[11px] ${trace.error ? 'bg-red-50 text-red-600' : 'bg-white'}`}>{trace.output || trace.error || '（无输出）'}</pre></details>
-    <p className="mt-1 text-right text-[10px] text-gray-400">输入 {trace.inputTokens} · 输出 {trace.outputTokens} tokens</p>
+    <p className="mt-1 text-right text-[10px] text-gray-400">耗时 {trace.latencyMs === undefined ? '—' : `${(trace.latencyMs / 1000).toFixed(2)} 秒`} · 输入 {trace.inputTokens} · 输出 {trace.outputTokens} tokens</p>
   </div>
 }
 function Pager({ page, total, size, setPage }: { page: number; total: number; size: number; setPage: (page: number) => void }) { const pages = Math.max(1, Math.ceil(total / size)); return <div className="mt-2 flex justify-between text-xs"><button disabled={page === 0} onClick={() => setPage(page - 1)} className="disabled:text-gray-300">上一页</button><span>{page + 1} / {pages}</span><button disabled={page + 1 >= pages} onClick={() => setPage(page + 1)} className="disabled:text-gray-300">下一页</button></div> }

@@ -2,7 +2,7 @@ import { v4 as uuid } from 'uuid'
 import { db } from '../db/db'
 import { chatCompletion } from './deepseek'
 import { momentReactionProbability, uniqueRelationPairs } from './contactRelations'
-import { describeCurrentSchedule, isPhoneAvailable } from './schedule'
+import { describeCurrentWorldSchedule, isWorldPhoneAvailable } from './schedule'
 import { searchPexelsPhoto } from './photoSearch'
 import { recordSocialEvent } from './socialEvents'
 import { displayName } from './contact'
@@ -13,6 +13,7 @@ import { recentMemoriesText, socialMemoriesText } from './memory'
 import { recentSocialEventsText } from './socialEvents'
 import { recentSharedOriginalContext } from './sharedRecentContext'
 import type { AppSettings, Contact } from '../types'
+import { adjudicateStateChanges, type StateEvidence } from './stateAdjudicator'
 
 const ELIGIBLE_WINDOW_MS = 10 * 60 * 1000
 /** Of the friends who *do* react (relationship allows it and the dice roll passed), this fraction also leave a comment instead of just liking. */
@@ -62,11 +63,9 @@ function shuffle<T>(arr: T[]): T[] {
   return copy
 }
 
-export function eligiblePosters(contacts: Contact[], now: number): Contact[] {
-  const nowDate = new Date(now)
-  return contacts.filter(
-    (c) => (!c.lastMomentAt || now - c.lastMomentAt > ELIGIBLE_WINDOW_MS) && isPhoneAvailable(c, nowDate),
-  )
+export async function eligiblePosters(contacts: Contact[], now: number): Promise<Contact[]> {
+  const rows = await Promise.all(contacts.map(async (contact) => ({ contact, available: await isWorldPhoneAvailable(contact.id) })))
+  return rows.filter(({ contact, available }) => (!contact.lastMomentAt || now - contact.lastMomentAt > ELIGIBLE_WINDOW_MS) && available).map(({ contact }) => contact)
 }
 
 /**
@@ -124,8 +123,8 @@ function buildMomentsPrompt(
   worldviewText: string,
   stickerNames: string[],
   contexts: Map<string, string>,
+  scheduleTexts: Map<string, string>,
 ): string {
-  const now = new Date()
   const sections = entries
     .map((e, i) => {
       const commenterLines =
@@ -138,7 +137,7 @@ function buildMomentsPrompt(
               )
               .join('\n')
           : '  （这条没有人评论）'
-      const scheduleLine = describeCurrentSchedule(e.poster, now)
+      const scheduleLine = scheduleTexts.get(e.poster.id) ?? ''
       const statusLine = scheduleLine ? `${e.poster.name}${scheduleLine} (内容可以但不强制符合这个状态)\n` : ''
       const photoLine = e.willHavePhoto
         ? `这条动态会配一张照片 你还需要为它写一个"imageKeyword"(简短英文搜图短语 贴合你写的这条朋友圈内容 用来找一张对应的照片)\n`
@@ -248,7 +247,7 @@ export async function refreshMoments(settings: AppSettings): Promise<RefreshMome
   if (!settings.apiKey) return { postedCount: 0, message: '还没有配置API Key' }
 
   const now = Date.now()
-  const eligible = eligiblePosters(contacts, now)
+  const eligible = await eligiblePosters(contacts, now)
   if (eligible.length === 0) return { postedCount: 0, message: '大家都刚发过 稍后再刷新试试' }
 
   const count = pickPosterCount(eligible.length, contacts.length, settings.proactiveMomentsMax)
@@ -273,12 +272,13 @@ export async function refreshMoments(settings: AppSettings): Promise<RefreshMome
     return [contact.id, [originalContext, privateMemories, socialMemories, events].filter(Boolean).join('\n\n').slice(0, 10_500)] as const
   }))
   const contexts = new Map(contextRows)
+  const scheduleTexts = new Map(await Promise.all(involved.map(async (contact) => [contact.id, await describeCurrentWorldSchedule(contact.id)] as const)))
   const raw = await chatCompletion({
     apiKey: settings.apiKey,
     baseUrl: settings.baseUrl,
     model: settings.model,
     messages: [
-      { role: 'system', content: buildMomentsPrompt(entries, isModuleEnabled('worldview') ? await retrieveWorldbookContext(entries.map((e) => `${e.poster.name} ${e.poster.systemPrompt} ${e.poster.memoryFacts}`).join('\n')) : '', stickerNames, contexts) },
+      { role: 'system', content: buildMomentsPrompt(entries, isModuleEnabled('worldview') ? await retrieveWorldbookContext(entries.map((e) => `${e.poster.name} ${e.poster.systemPrompt} ${e.poster.memoryFacts}`).join('\n')) : '', stickerNames, contexts, scheduleTexts) },
       { role: 'user', content: '请生成' },
     ],
     jsonMode: true,
@@ -292,6 +292,7 @@ export async function refreshMoments(settings: AppSettings): Promise<RefreshMome
   const parsed = parseMomentsResponse(reviewedRaw, expectedCommentCounts)
   if (!parsed) return { postedCount: 0, message: '生成失败 请再刷新试试' }
 
+  const stateEvidence: StateEvidence[] = []
   for (let i = 0; i < entries.length; i++) {
     const { poster, commenters, willHavePhoto } = entries[i]
     const { content, comments, imageKeyword } = parsed[i]
@@ -322,6 +323,7 @@ export async function refreshMoments(settings: AppSettings): Promise<RefreshMome
       imagePhotographer,
       imagePhotographerUrl,
     })
+    stateEvidence.push({ id: momentId, actorId: poster.id, actorName: displayName(poster), content, perceivedBy: involved.map((contact) => contact.id) })
     await recordSocialEvent({
       type: 'moment_posted',
       actorId: poster.id,
@@ -350,13 +352,15 @@ export async function refreshMoments(settings: AppSettings): Promise<RefreshMome
       if (reactor.willComment) {
         const commentText = comments[commentIndex++]
         if (commentText) {
+          const commentId = uuid()
           await db.momentComments.add({
-            id: uuid(),
+            id: commentId,
             momentId,
             authorContactId: reactor.contact.id,
             content: commentText,
             createdAt: now,
           })
+          stateEvidence.push({ id: commentId, actorId: reactor.contact.id, actorName: displayName(reactor.contact), content: commentText, perceivedBy: involved.map((contact) => contact.id) })
           await recordSocialEvent({
             type: 'moment_commented',
             actorId: reactor.contact.id,
@@ -371,6 +375,8 @@ export async function refreshMoments(settings: AppSettings): Promise<RefreshMome
       }
     }
   }
+
+  try { await adjudicateStateChanges({ scene: 'moment', conversationId: `moment-refresh:${now}`, characterIds: involved.map((contact) => contact.id), evidence: stateEvidence, settings }) } catch (err) { console.warn('[state] 朋友圈刷新状态裁决失败', err) }
 
   return { postedCount: entries.length }
 }
@@ -394,11 +400,10 @@ function planUserMomentReactors(contacts: Contact[]): UserMomentReactorPlan[] {
   return plans
 }
 
-function buildUserMomentCommentPrompt(content: string, commenters: Contact[], worldviewText: string, stickerNames: string[], contexts: Map<string, string>): string {
-  const now = new Date()
+function buildUserMomentCommentPrompt(content: string, commenters: Contact[], worldviewText: string, stickerNames: string[], contexts: Map<string, string>, scheduleTexts: Map<string, string>): string {
   const commenterLines = commenters
     .map((c, i) => {
-      const scheduleLine = describeCurrentSchedule(c, now)
+      const scheduleLine = scheduleTexts.get(c.id) ?? ''
       const samples = formatSpeechSamplesForScene(c.speechSamples, 'moment', 1)
       return `评论者${i + 1}: ${c.name} 人设: ${c.systemPrompt}\n${personalityTraitLine(c.personalityTrait, c.warmth ?? 0) || '性格特质: 无'}${samples ? `\n说话样例: ${samples}` : ''}${scheduleLine ? ` ${scheduleLine}` : ''}\n和用户的关系: ${c.relationshipBase || '朋友'} ${c.relationshipDynamic || ''} 好感度:${c.warmth ?? 0} 当前心情:${c.mood?.text || '平静'}\n最近素材: ${contexts.get(c.id) || '无'}`
     })
@@ -465,6 +470,7 @@ export async function postUserMoment(content: string, settings: AppSettings): Pr
         ])
         return [contact.id, [originalContext, memories, social, events].filter(Boolean).join('\n\n').slice(0, 9_000)] as const
       }))
+      const scheduleTexts = new Map(await Promise.all(commenterPlans.map(async ({ contact }) => [contact.id, await describeCurrentWorldSchedule(contact.id)] as const)))
       const raw = await chatCompletion({
         apiKey: settings.apiKey,
         baseUrl: settings.baseUrl,
@@ -478,6 +484,7 @@ export async function postUserMoment(content: string, settings: AppSettings): Pr
               isModuleEnabled('worldview') ? await retrieveWorldbookContext(content) : '',
               stickerNames,
               new Map(contextRows),
+              scheduleTexts,
             ),
           },
           { role: 'user', content: '请生成' },
@@ -494,6 +501,7 @@ export async function postUserMoment(content: string, settings: AppSettings): Pr
   }
 
   let commentIndex = 0
+  const stateEvidence: StateEvidence[] = [{ id: momentId, actorId: 'user', actorName: '用户', content, perceivedBy: plans.map((plan) => plan.contact.id) }]
   for (const plan of plans) {
     await db.momentLikes.add({ id: uuid(), momentId, likerId: plan.contact.id, createdAt: now })
     await recordSocialEvent({
@@ -509,13 +517,15 @@ export async function postUserMoment(content: string, settings: AppSettings): Pr
     if (plan.willComment) {
       const text = comments[commentIndex++]
       if (text) {
+        const commentId = uuid()
         await db.momentComments.add({
-          id: uuid(),
+          id: commentId,
           momentId,
           authorContactId: plan.contact.id,
           content: text,
           createdAt: now,
         })
+        stateEvidence.push({ id: commentId, actorId: plan.contact.id, actorName: displayName(plan.contact), content: text, perceivedBy: plans.map((item) => item.contact.id) })
         await recordSocialEvent({
           type: 'moment_commented',
           actorId: plan.contact.id,
@@ -529,6 +539,7 @@ export async function postUserMoment(content: string, settings: AppSettings): Pr
       }
     }
   }
+  try { await adjudicateStateChanges({ scene: 'moment', conversationId: `moment:${momentId}`, characterIds: plans.map((plan) => plan.contact.id), evidence: stateEvidence, settings }) } catch (err) { console.warn('[state] 用户朋友圈互动状态裁决失败', err) }
 }
 
 function cleanPlainReply(raw: string): string {
@@ -546,9 +557,9 @@ function buildMomentReplyPrompt(
   worldviewText: string,
   stickerNames: string[],
   context: string,
+  scheduleLine: string,
 ): string {
   const worldviewSection = worldviewText ? `【这个世界的设定】\n${worldviewText}\n\n` : ''
-  const scheduleLine = describeCurrentSchedule(poster, new Date())
   const scheduleSection = scheduleLine ? `你${scheduleLine}(回复内容可以但不强制符合这个状态)\n` : ''
 
   const samples = formatSpeechSamplesForScene(poster.speechSamples, 'moment', 2)
@@ -609,7 +620,7 @@ export async function generateMomentReply(
       messages: [
         {
           role: 'system',
-          content: buildMomentReplyPrompt(poster, moment.content, threadLines, isModuleEnabled('worldview') ? await retrieveWorldbookContext(`${poster.name}\n${poster.systemPrompt}\n${moment.content}\n${threadLines}`) : '', stickerNames, [originalContext, privateMemories, socialMemories, events].filter(Boolean).join('\n\n').slice(0, 9_500)),
+          content: buildMomentReplyPrompt(poster, moment.content, threadLines, isModuleEnabled('worldview') ? await retrieveWorldbookContext(`${poster.name}\n${poster.systemPrompt}\n${moment.content}\n${threadLines}`) : '', stickerNames, [originalContext, privateMemories, socialMemories, events].filter(Boolean).join('\n\n').slice(0, 9_500), await describeCurrentWorldSchedule(poster.id)),
         },
         { role: 'user', content: '请回复' },
       ],
@@ -618,8 +629,9 @@ export async function generateMomentReply(
     const cleaned = cleanPlainReply(raw)
     if (!cleaned) return
 
+    const replyId = uuid()
     await db.momentComments.add({
-      id: uuid(),
+      id: replyId,
       momentId,
       authorContactId: poster.id,
       content: cleaned,
@@ -635,6 +647,13 @@ export async function generateMomentReply(
       summary: `${poster.name}在自己的朋友圈下回复了用户: ${cleaned}`,
       importance: 2,
     })
+    try {
+      const trigger = existingComments.find((comment) => comment.id === triggeringCommentId)
+      await adjudicateStateChanges({ scene: 'moment', conversationId: `moment:${momentId}`, characterIds: [poster.id], settings, evidence: [
+        ...(trigger ? [{ id: trigger.id, actorId: trigger.authorContactId, actorName: labelFor(trigger.authorContactId), content: trigger.content, perceivedBy: [poster.id] }] : []),
+        { id: replyId, actorId: poster.id, actorName: displayName(poster), content: cleaned, perceivedBy: [poster.id] },
+      ] })
+    } catch (err) { console.warn('[state] 朋友圈回复状态裁决失败', err) }
   } catch {
     // best-effort background reply; failing silently is fine, same as the other moments background jobs
   }
@@ -685,11 +704,14 @@ Rules: generate 1 to 3 comments total; keep it public and conversational; do not
       return candidateIds.includes(authorId) && content ? [{ authorId, content, replyToCommentId }] : []
     }).slice(0, 3)
     if (directId && directId !== 'user' && candidateIds.includes(directId) && !output.some((item) => item.authorId === directId)) return
+    const stateEvidence: StateEvidence[] = trigger ? [{ id: trigger.id, actorId: trigger.authorContactId, actorName: trigger.authorContactId === 'user' ? settings.userNickname || '用户' : displayName(byId.get(trigger.authorContactId)!), content: trigger.content, perceivedBy: candidateIds }] : []
     for (const item of output) {
       const id = uuid()
       await db.momentComments.add({ id, momentId, authorContactId: item.authorId, content: item.content, replyToCommentId: item.replyToCommentId, createdAt: Date.now() })
       await recordSocialEvent({ type: 'moment_commented', actorId: item.authorId, targetId: posterContactId, relatedContactIds: Array.from(new Set([item.authorId, ...(posterContactId ? [posterContactId] : [])])), momentId, messageId: id, summary: `${names.get(item.authorId) || '某人'}参与了朋友圈讨论: ${item.content}`, importance: 2 })
+      stateEvidence.push({ id, actorId: item.authorId, actorName: names.get(item.authorId) || '角色', content: item.content, perceivedBy: candidateIds })
     }
+    try { await adjudicateStateChanges({ scene: 'moment', conversationId: `moment:${momentId}`, characterIds: candidateIds, evidence: stateEvidence, settings }) } catch (err) { console.warn('[state] 朋友圈讨论状态裁决失败', err) }
   } catch {
     // A discussion is a best-effort enhancement; the user's own comment is already persisted.
   }

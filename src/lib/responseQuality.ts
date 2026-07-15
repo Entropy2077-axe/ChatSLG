@@ -1,7 +1,7 @@
 import { chatCompletion } from './deepseek'
 import { displayName } from './contact'
 import { activeUpcomingPlansText } from './memory'
-import { describeCurrentSchedule, describeUpcomingScheduleText } from './schedule'
+import { describeCurrentWorldSchedule } from './schedule'
 import { formatPersonaProfile, personalityTraitLine } from './prompt'
 import type { AdminAiTraceStage, AiBubble, AppSettings, Contact, GroupAiBubble, GroupEnergyLevel } from '../types'
 
@@ -128,8 +128,8 @@ export async function validatePrivateTurn(opts: {
 }): Promise<{ raw: string; repaired: boolean; reason?: string; detectedInvalid?: boolean }> {
   const name = displayName(opts.contact)
   const now = new Date()
-  const currentSchedule = describeCurrentSchedule(opts.contact, now)
-  const upcomingSchedule = describeUpcomingScheduleText(opts.contact, now)
+  const currentSchedule = await describeCurrentWorldSchedule(opts.contact.id)
+  const upcomingSchedule = ''
   const upcomingPlans = activeUpcomingPlansText(opts.contact, now)
   const activeMood = opts.contact.mood?.text && Date.now() < opts.contact.mood.expiresAt ? opts.contact.mood.text : ''
   const worldbookInfo = opts.worldbookText ? `\nWorldbook (canon world rules — content consistent with these is NOT "invented facts", it is legitimate world-building):\n${opts.worldbookText}` : ''
@@ -250,10 +250,10 @@ export async function validateGroupDraft(opts: {
   const speakerText = opts.speakers.map((speaker, i) => `${i + 1}. ${displayName(speaker)}`).join('\n')
   const energyRule =
     opts.energyLevel === 'cold'
-      ? '冷淡: 整轮应有1到3句话。'
+      ? '冷清: 整轮应有1到2句话。'
       : opts.energyLevel === 'lively'
-        ? '热闹: 整轮应有6到12句话，可以多次穿插发言。'
-        : '普通: 整轮应有3到7句话。'
+        ? '热闹: 整轮应有5到6句话，可以多次穿插发言。'
+        : '一般: 整轮应有3到4句话。'
   const chatterRule = opts.allowAiChatter
     ? opts.speakers.length >= 2
       ? 'AI互聊已开启: 有自然接点时可以出现AI之间互动；不能为了满足规则而强行点名或接话。'

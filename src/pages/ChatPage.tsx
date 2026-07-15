@@ -3,6 +3,7 @@ import { useLiveQuery } from 'dexie-react-hooks'
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { db } from '../db/db'
 import { TopBar } from '../components/TopBar'
+import { Avatar } from '../components/Avatar'
 import { MessageBubble } from '../components/MessageBubble'
 import { SearchOverlay } from '../components/SearchOverlay'
 import { ActionSheet } from '../components/ActionSheet'
@@ -18,6 +19,7 @@ import { downloadDataUrl, generateChatCaptureImage, shareDataUrl } from '../lib/
 import type { Contact, Message } from '../types'
 import { v4 as uuid } from 'uuid'
 import { claimRedPacket, transferFunds, USER_WALLET_ID } from '../lib/finance'
+import { audibilityBetween } from '../lib/world'
 
 const EMPTY_MESSAGES: Message[] = []
 
@@ -49,8 +51,19 @@ export function ChatPage({ conversationIdOverride, embedded = false }: { convers
     () => (group ? db.contacts.bulkGet(group.memberContactIds) : []),
     [group],
   )
-  const groupMembers = useMemo(() => (groupMembersRaw ?? []).filter((c): c is Contact => !!c), [groupMembersRaw])
+  // Legacy group rows can contain duplicate ids; never render duplicate keys.
+  const groupMembers = useMemo(() => Array.from(new Map((groupMembersRaw ?? []).filter((c): c is Contact => !!c).map((contact) => [contact.id, contact])).values()), [groupMembersRaw])
   const memberById = useMemo(() => new Map(groupMembers.map((c) => [c.id, c])), [groupMembers])
+  const world = useLiveQuery(() => db.worldState.get('global'), [])
+  const allContacts = useLiveQuery(() => (conversation?.channel === 'scene' ? db.contacts.orderBy('createdAt').toArray() : Promise.resolve([] as Contact[])), [conversation]) ?? []
+  const scenePeople = useLiveQuery(async () => {
+    if (conversation?.channel !== 'scene' || !conversation.sceneLocationId) return [] as Array<{ contact: Contact; state: 'here' | 'audible' | 'away' }>
+    return Promise.all(allContacts.map(async (candidate) => {
+      if (candidate.currentLocationId === conversation.sceneLocationId) return { contact: candidate, state: 'here' as const }
+      if (candidate.currentLocationId && await audibilityBetween(conversation.sceneLocationId!, candidate.currentLocationId) !== 'none') return { contact: candidate, state: 'audible' as const }
+      return { contact: candidate, state: 'away' as const }
+    }))
+  }, [conversation, allContacts, world?.step]) ?? []
 
   const messages =
     useLiveQuery(
@@ -99,6 +112,7 @@ export function ChatPage({ conversationIdOverride, embedded = false }: { convers
   const [captureImageUrl, setCaptureImageUrl] = useState('')
   const [captureBusy, setCaptureBusy] = useState(false)
   const [appsOpen, setAppsOpen] = useState(false)
+  const [peopleOpen, setPeopleOpen] = useState(false)
   const [financeMode, setFinanceMode] = useState<'transfer'|'redPacket'|'loan'|null>(null)
   const [financeAmount,setFinanceAmount]=useState('')
   const [financeNote,setFinanceNote]=useState('')
@@ -187,7 +201,7 @@ export function ChatPage({ conversationIdOverride, embedded = false }: { convers
 
   async function handleSend() {
     const text = input.trim()
-    if (!text || !conversationId) return
+    if (!text || !conversationId || aiTyping) return
     if (isGroupConv) {
       if (!group) return
       const typedMentionIds = groupMembers
@@ -423,6 +437,7 @@ export function ChatPage({ conversationIdOverride, embedded = false }: { convers
               >
                 选择
               </button>
+              {isGroupConv && <button onClick={() => setPeopleOpen((open) => !open)} className="flex h-9 items-center gap-1 px-1 text-gray-500" aria-label="人物列表"><svg width="19" height="19" viewBox="0 0 24 24" fill="none"><circle cx="9" cy="8" r="3" stroke="currentColor" strokeWidth="1.6"/><circle cx="17" cy="9" r="2.3" stroke="currentColor" strokeWidth="1.6"/><path d="M3.5 19c.9-3 3-4.7 5.5-4.7s4.6 1.7 5.5 4.7M14.5 15c2.4.1 4.3 1.4 5 3.7" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round"/></svg><span className="text-[10px]">{conversation?.channel === 'scene' ? scenePeople.filter((item) => item.state !== 'away').length : groupMembers.length}</span></button>}
               {!embedded && <button
                 onClick={() => navigate(headerInfoPath)}
                 className="flex h-9 w-9 items-center justify-center text-gray-500"
@@ -437,6 +452,7 @@ export function ChatPage({ conversationIdOverride, embedded = false }: { convers
           )
         }
       />
+      {peopleOpen && isGroupConv && <div className="max-h-44 shrink-0 overflow-y-auto border-b border-gray-100 bg-white px-3 py-2"><p className="mb-2 text-[11px] text-gray-400">{conversation?.channel === 'scene' ? '当前现场人物' : '聊天成员'}</p><div className="space-y-1">{(conversation?.channel === 'scene' ? scenePeople : groupMembers.map((contact) => ({ contact, state: 'here' as const }))).map(({ contact, state }) => <button key={contact.id} onClick={() => navigate(`/contact/${contact.id}`)} className="flex w-full items-center gap-2 rounded-lg px-1 py-1 text-left hover:bg-gray-50"><Avatar avatar={contact.avatar} color={contact.avatarColor} size={30} rounded="full"/><span className={`flex-1 text-sm ${state === 'away' ? 'text-gray-300' : state === 'audible' ? 'text-amber-600' : 'text-gray-700'}`}>{displayName(contact)}</span>{conversation?.channel === 'scene' && <span className={`text-[10px] ${state === 'away' ? 'text-gray-300' : state === 'audible' ? 'text-amber-500' : 'text-emerald-600'}`}>{state === 'here' ? '正在这里' : state === 'audible' ? '能听到' : '不在这里'}</span>}</button>)}</div></div>}
       {statusLine && (
         <button
           onClick={() => navigate(headerInfoPath)}
@@ -558,19 +574,20 @@ export function ChatPage({ conversationIdOverride, embedded = false }: { convers
               <textarea
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
+                disabled={aiTyping}
                 onKeyDown={(e) => {
                   if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
                     e.preventDefault()
                     handleSend()
                   }
                 }}
-                placeholder={aiTyping ? '对方正在输入 你可以直接插话打断' : '发消息…'}
+                placeholder={aiTyping ? '正在处理上一轮消息…' : '发消息…'}
                 rows={1}
                 className="max-h-24 flex-1 resize-none rounded-xl border border-gray-200 px-3 py-2 text-[14.5px] outline-none disabled:cursor-wait disabled:bg-gray-50 disabled:text-gray-400"
               />
               <button
                 onClick={handleSend}
-                disabled={!input.trim()}
+                disabled={aiTyping || !input.trim()}
                 className="shrink-0 rounded-xl bg-gray-900 px-4 py-2 text-sm text-white disabled:opacity-40"
               >
                 发送

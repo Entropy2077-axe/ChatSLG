@@ -18,7 +18,7 @@ import type {
   WalletAccount, WalletTransaction, Loan, JobListing, InterviewSession,
   WorldState, LocationNode, AcousticEdge, CharacterSchedule, Appointment,
   WorldEvent, PerceivedEvent, CharacterDiary, PendingPhoneMessage,
-  WorldMapRecord,
+  WorldMapRecord, OutfitConstraint, ScheduleConstraint,
 } from '../types'
 
 export class ChatSLGDB extends Dexie {
@@ -60,6 +60,8 @@ export class ChatSLGDB extends Dexie {
   characterDiaries!: Table<CharacterDiary, string>
   pendingPhoneMessages!: Table<PendingPhoneMessage, string>
   worldMaps!: Table<WorldMapRecord, string>
+  outfitConstraints!: Table<OutfitConstraint, string>
+  scheduleConstraints!: Table<ScheduleConstraint, string>
 
   constructor() {
     super('chatslg-db')
@@ -265,6 +267,16 @@ export class ChatSLGDB extends Dexie {
       lifeEvents: 'id, contactId, occurredAt, visibility, importance, [contactId+occurredAt], *participantContactIds',
       groupPlans: 'id, groupId, status, scheduledAt, createdAt, [groupId+createdAt]',
       momentComments: 'id, momentId, authorContactId, createdAt, [momentId+createdAt]',
+    })
+    this.version(28).stores({
+      outfitConstraints: 'id, characterId, startDay, endDay, createdAt, [characterId+startDay]',
+      scheduleConstraints: 'id, characterId, startDay, endDay, priority, createdAt, [characterId+startDay]',
+    }).upgrade(async (tx) => {
+      const contacts = await tx.table('contacts').toArray() as Array<Record<string, unknown>>
+      for (const contact of contacts) {
+        if (contact.defaultOutfit || !contact.id || !contact.outfit || typeof contact.outfit !== 'object') continue
+        await tx.table('contacts').update(contact.id as string, { defaultOutfit: contact.outfit })
+      }
     })
   }
 }

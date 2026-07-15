@@ -1,4 +1,4 @@
-import type { AiBubble, AiResponse, OutfitChangeProposal } from '../types'
+import type { AiBubble, AiResponse, LocationChangeProposal, OutfitChangeProposal } from '../types'
 import { normalizeMood } from './mood'
 
 export interface ParsedAiTurn {
@@ -7,6 +7,7 @@ export interface ParsedAiTurn {
   mood?: string
   thought?: string
   outfitChange?: OutfitChangeProposal
+  locationChange?: LocationChangeProposal
 }
 
 export function parseAiResponse(raw: string): ParsedAiTurn {
@@ -24,6 +25,7 @@ export function parseAiResponse(raw: string): ParsedAiTurn {
       mood: jsonResult.mood,
       thought: jsonResult.thought,
       outfitChange: jsonResult.outfitChange,
+      locationChange: jsonResult.locationChange,
     }
   }
 
@@ -85,7 +87,18 @@ function tryParseJson(trimmedRaw: string): ParsedAiTurn | null {
   const mood = typeof parsed.mood === 'string' && parsed.mood.trim() ? normalizeMood(parsed.mood) : undefined
   const thought = typeof parsed.thought === 'string' && parsed.thought.trim() ? parsed.thought.trim().slice(0, 100) : undefined
   const outfitChange = parseOutfitChange(parsed.outfitChange)
-  return { bubbles, knowledgeQueries: [], mood, thought, outfitChange }
+  const locationChange = parseLocationChange(parsed.locationChange)
+  return { bubbles, knowledgeQueries: [], mood, thought, outfitChange, locationChange }
+}
+
+export function parseLocationChange(raw: unknown): LocationChangeProposal | undefined {
+  if (!raw || typeof raw !== 'object') return undefined
+  const value = raw as Record<string, unknown>
+  const sourceEventIds = Array.isArray(value.sourceEventIds)
+    ? value.sourceEventIds.filter((item): item is string => typeof item === 'string' && !!item.trim()).slice(0, 8)
+    : []
+  if (!Number.isInteger(Number(value.worldVersion)) || typeof value.characterId !== 'string' || !value.characterId.trim() || typeof value.locationId !== 'string' || !value.locationId.trim() || typeof value.reason !== 'string' || !value.reason.trim() || sourceEventIds.length === 0) return undefined
+  return { characterId: value.characterId.trim(), worldVersion: Number(value.worldVersion), locationId: value.locationId.trim(), sourceEventIds, reason: value.reason.trim().slice(0, 160) }
 }
 
 function parseFinanceMarker(line: string): AiBubble | null {
@@ -134,10 +147,8 @@ export function parseRawPrivateDraft(raw: string, fallbackMood: string = '😌')
 
 export function rawPrivateDraftNeedsUtility(raw: string, latestUserText: string): boolean {
   if (!/<mood>[\s\S]*?<\/mood>/i.test(raw) || !/<thought>[\s\S]*?<\/thought>/i.test(raw)) return true
-  const text = `${latestUserText}\n${raw}`
-  const scheduleIntent = /(约|见面|碰面|一起去|一起吃|改期|日程|安排|明天|后天|周[一二三四五六日天]|几点|上午|下午|晚上|今晚)/.test(text)
-  const outfitIntent = /(穿上|脱下|换上|换掉|衣服|外套|裤子|裙子|鞋子|帽子|围巾|配饰)/.test(text)
-  return scheduleIntent || outfitIntent
+  void latestUserText
+  return /\[(?:transfer|redPacket|loanRequest|loanDecision|giftPurchase):/i.test(raw)
 }
 
 export function serializePrivateTurn(parsed: ParsedAiTurn): string {
@@ -146,6 +157,7 @@ export function serializePrivateTurn(parsed: ParsedAiTurn): string {
     mood: parsed.mood,
     thought: parsed.thought,
     ...(parsed.outfitChange ? { outfitChange: parsed.outfitChange } : {}),
+    ...(parsed.locationChange ? { locationChange: parsed.locationChange } : {}),
   })
 }
 
@@ -157,8 +169,10 @@ export function parseOutfitChange(raw: unknown): OutfitChangeProposal | undefine
     if (typeof part === 'string' && part.trim()) patch[key] = part.trim().slice(0, 80)
   }
   const sourceEventIds = Array.isArray(value.sourceEventIds) ? value.sourceEventIds.filter((item): item is string => typeof item === 'string' && !!item.trim()).slice(0, 8) : []
-  if (!Number.isInteger(Number(value.worldVersion)) || !Object.keys(patch).length || !sourceEventIds.length || typeof value.characterId !== 'string' || typeof value.reason !== 'string') return undefined
-  return { characterId: value.characterId, worldVersion: Number(value.worldVersion), patch, reasonType: value.reasonType === 'schedule_change' ? 'schedule_change' : 'conversation_event', sourceEventIds, sourceScheduleId: typeof value.sourceScheduleId === 'string' ? value.sourceScheduleId : undefined, reason: value.reason.slice(0, 160) }
+  const startDay = Number(value.startDay), endDay = Number(value.endDay)
+  const slots = Array.isArray(value.slots) ? value.slots.filter((slot): slot is 'morning'|'day'|'evening'|'night' => ['morning','day','evening','night'].includes(String(slot))) : undefined
+  if (!Number.isInteger(Number(value.worldVersion)) || !Object.keys(patch).length || !sourceEventIds.length || typeof value.characterId !== 'string' || typeof value.reason !== 'string' || value.accepted !== true) return undefined
+  return { characterId: value.characterId, worldVersion: Number(value.worldVersion), patch, reasonType: value.reasonType === 'schedule_change' ? 'schedule_change' : 'conversation_event', sourceEventIds, sourceScheduleId: typeof value.sourceScheduleId === 'string' ? value.sourceScheduleId : undefined, reason: value.reason.slice(0, 160), accepted: true, ...(Number.isInteger(startDay) ? { startDay } : {}), ...(Number.isInteger(endDay) ? { endDay } : {}), ...(slots?.length ? { slots } : {}) }
 }
 
 function parseTextBubbleContent(m: Record<string, unknown>): string {
@@ -166,10 +180,12 @@ function parseTextBubbleContent(m: Record<string, unknown>): string {
   return content.trim()
 }
 
-function parseScheduleChangeBubble(m: Record<string, unknown>): AiBubble | null {
+export function parseScheduleChangeBubble(m: Record<string, unknown>): AiBubble | null {
   const worldVersion = Number(m.worldVersion)
-  const effectiveDay = Number(m.effectiveDay)
+  const effectiveDay = Number(m.effectiveDay ?? m.startDay)
+  const endDay = Number(m.endDay ?? effectiveDay)
   const slot = m.slot
+  const slots = Array.isArray(m.slots) ? m.slots.filter((value): value is 'morning'|'day'|'evening'|'night' => ['morning','day','evening','night'].includes(String(value))) : undefined
   const locationId = typeof m.locationId === 'string' ? m.locationId.trim() : ''
   const phoneAccess = m.phoneAccess
   const activity = typeof m.activity === 'string' ? m.activity.trim() : ''
@@ -177,16 +193,16 @@ function parseScheduleChangeBubble(m: Record<string, unknown>): AiBubble | null 
   const priority = m.priority
   const reason = typeof m.reason === 'string' ? m.reason.trim() : ''
 
-  if (!Number.isInteger(worldVersion) || !Number.isInteger(effectiveDay) || effectiveDay < 1) return null
-  if (!['morning', 'day', 'evening', 'night'].includes(String(slot))) return null
+  if (!Number.isInteger(worldVersion) || !Number.isInteger(effectiveDay) || !Number.isInteger(endDay) || effectiveDay < 1 || endDay < effectiveDay) return null
+  if ((!slots?.length) && !['morning', 'day', 'evening', 'night'].includes(String(slot))) return null
   if (phoneAccess !== 'available' && phoneAccess !== 'unavailable') return null
   if (priority !== 'override' && priority !== 'commitment') return null
-  if (!locationId || !activity || !summary || !reason) return null
+  if (!locationId || !activity || !summary || !reason || m.accepted !== true) return null
 
   return {
-    type: 'scheduleChange', worldVersion, effectiveDay,
-    slot: slot as 'morning' | 'day' | 'evening' | 'night', locationId,
-    phoneAccess, activity, summary, priority, reason,
+    type: 'scheduleChange', worldVersion, effectiveDay, endDay,
+    slot: (slot ?? slots?.[0]) as 'morning' | 'day' | 'evening' | 'night', slots, locationId,
+    phoneAccess, activity, summary, priority, reason, accepted: true,
   }
 }
 

@@ -1,10 +1,10 @@
 import { db } from '../db/db'
-import { extractJsonObject, parseKnowledgeQueriesField, parseOutfitChange } from './aiProtocol'
+import { extractJsonObject, parseKnowledgeQueriesField, parseLocationChange, parseOutfitChange } from './aiProtocol'
 import { activeUpcomingPlansText } from './memory'
 import { customPersonalityTraitsLine, formatPersonaProfile, formatSpeechSamplesForScene, personalityTraitLine } from './prompt'
 import { describeCurrentSchedule } from './schedule'
 import { isModuleEnabled } from '../features'
-import type { Contact, GroupAiBubble, GroupAiResponse, GroupEnergyLevel, GroupSpeakerLimit, OutfitChangeProposal } from '../types'
+import type { Contact, GroupAiBubble, GroupAiResponse, GroupEnergyLevel, GroupSpeakerLimit, LocationChangeProposal, OutfitChangeProposal, ScheduleChangeProposal } from '../types'
 import { dynamicRelationScore } from './contactRelations'
 import { MOOD_EMOJIS, normalizeMood } from './mood'
 
@@ -196,6 +196,9 @@ export function buildGroupRawChatPrompt(opts: {
   groupVibeText?: string
   allowAiChatter?: boolean
   energyLevel?: GroupEnergyLevel
+  /** Scene-only physical/audibility facts. Every speaker must retain this location. */
+  scenePresenceText?: string
+  replyCountRule?: string
   currentTimeText: string
   userProfileText: string
   targetedContextText?: string
@@ -205,6 +208,7 @@ export function buildGroupRawChatPrompt(opts: {
   selfIterationGlobalText?: string
   speakerMemoriesMap?: Map<string, string>
   aiRelationshipText?: string
+  speakerStateTextMap?: Map<string, string>
 }): string {
   const rosterText = opts.allMembers.map((m) => `- ${m.name}`).join('\n')
   const speakerNames = opts.speakers.map((s) => s.name).join('、')
@@ -212,7 +216,7 @@ export function buildGroupRawChatPrompt(opts: {
     .map((c, i) => {
       const base = c.relationshipBase || '朋友'
       const plansText = activeUpcomingPlansText(c, new Date())
-      const scheduleText = describeCurrentSchedule(c, new Date())
+      const scheduleText = opts.speakerStateTextMap?.get(c.id) ?? ''
       const samplesText = formatSpeechSamplesForScene(c.speechSamples, 'group', 2)
       const recentMemoText = opts.speakerMemoriesMap?.get(c.id)
       return `【发言人${i + 1}: ${c.name}】
@@ -240,6 +244,8 @@ ${samplesText ? `- 说话样例:\n${samplesText}` : ''}`
   const selfIteration = opts.selfIterationGlobalText ? `\n【用户边界与偏好 - 全局】\n${opts.selfIterationGlobalText}` : ''
   const groupMemory = opts.groupMemoryText?.trim() ? `\n【群聊记忆】\n${opts.groupMemoryText.trim()}` : ''
   const groupVibe = opts.groupVibeText?.trim() ? `\n【群聊氛围】\n${opts.groupVibeText.trim()}` : ''
+  const scenePresence = opts.scenePresenceText ? `\n【现场位置（硬事实）】\n${opts.scenePresenceText}\n能听到现场的人可以回答，但绝不可以假装就在现场；回复时要符合其真实所在地点与可听见程度。` : ''
+  const replyCountRule = opts.replyCountRule ? `\n【本轮消息数】\n${opts.replyCountRule}` : ''
   const chatterRule = opts.allowAiChatter === false
     ? '- 本群设置为“围绕用户”：AI只能回应用户本轮消息、用户@/回复对象或用户相关话题，不要发展AI之间的旁支闲聊。\n'
     : opts.speakers.length >= 2
@@ -247,10 +253,10 @@ ${samplesText ? `- 说话样例:\n${samplesText}` : ''}`
       : '- 本轮只有一位AI发言人：不要求AI之间互聊，只需要自然回应用户或当前群聊上下文。\n'
   const energyRule =
     opts.energyLevel === 'cold'
-      ? '- 群聊热闹程度=冷淡：每个发言人通常只发1句话，整体克制。\n'
+      ? '- 群聊热闹程度=冷清：整轮总共1到2条消息。\n'
       : opts.energyLevel === 'lively'
-        ? '- 群聊热闹程度=热闹：整轮总共6到12条消息，允许同一人多次插入；不要为了凑条数灌水。\n'
-        : '- 群聊热闹程度=普通：整轮总共3到7条消息，节奏自然。\n'
+        ? '- 群聊热闹程度=热闹：整轮总共5到6条消息，允许同一人多次插入；不要为了凑条数灌水。\n'
+        : '- 群聊热闹程度=一般：整轮总共3到4条消息，节奏自然。\n'
   const formatContract = `硬格式契约:
 - 最终只输出群聊草稿行，不输出分析、计划、标题、编号、JSON、Markdown。
 - 第一行第一个字符必须是 <，最后一行必须也是一条完整草稿。
@@ -266,10 +272,10 @@ ${samplesText ? `- 说话样例:\n${samplesText}` : ''}`
 - ${opts.allowAiChatter === false ? 'AI互聊关闭：所有发言都围绕用户、用户@/回复对象或用户相关话题。' : opts.speakers.length >= 2 ? 'AI互聊开启：只有出现自然接点时才让成员互相接话；不要为了证明是群聊而硬凑互动。' : '本轮只有一位AI发言人：不要求AI之间互动。'}
 - ${
     opts.energyLevel === 'cold'
-      ? '冷淡：整轮总共1到3句。'
+      ? '冷清：整轮总共1到2句。'
       : opts.energyLevel === 'lively'
-        ? '热闹：整轮总共6到12句，可穿插多次。'
-        : '普通：整轮总共3到7句。'
+        ? '热闹：整轮总共5到6句，可穿插多次。'
+        : '一般：整轮总共3到4句。'
   }
 - 可以同一人多次插入，不需要按发言人顺序轮流。`
   const topicContract = `话题推进契约:
@@ -304,7 +310,7 @@ ${opts.stylePrompt}
 - 不要每句都解释完整，不要每条都追问，不要所有人都同一种语气。
 - 角色说话风格必须来自各自人设。
 
-${worldview}
+${worldview}${scenePresence}${replyCountRule}
 【当前上下文】
 时间: ${opts.currentTimeText}
 用户资料: ${opts.userProfileText}${groupMemory}${groupVibe}${knowledge}${targetedContext}${recentEvents}${aiRelationships}${selfIteration}
@@ -418,9 +424,12 @@ ${logicContext}
 - planCandidates 只在本轮出现至少两位成员明确同意的共同计划时填写；participantIndexes 使用发言人索引，不能凭空创建计划。
 - groupVibe 必填，用20到60字概括本轮之后最新的群聊氛围，会直接替换旧群聊氛围。
 - outfitChanges与messages同级。只有本轮原文包含明确穿脱行为、且角色完整感知了对应事件时才提取；使用硬状态里的characterId/worldVersion/eventId，只改实际变化部位。没有则给空数组。
+- State constraint rule: a user request alone never changes state. Output an outfit change only after that exact speaker clearly agrees, with accepted:true, startDay/endDay, optional slots and non-empty sourceEventIds. Discussion, refusal, empty patch or invalid/expired range must output no action.
+- scheduleChanges is also top-level. Each item must contain the speaking characterId, worldVersion, startDay/endDay, slots (or all four slots), a legal leaf locationId, activity, phoneAccess, priority, sourceEventIds, reason and accepted:true. Only explicit agreement may create it.
+- locationChanges与messages同级。角色因本轮明确对话自然决定换地点时才提取；必须使用硬状态里的characterId/worldVersion、合法叶子locationId和实际感知的eventId。没有则给空数组。
 
 只输出JSON，格式:
-{"messages":[{"speakerIndex":1,"speakerName":"...","type":"text","content":"...","thought":"...","mood":"..."}],"turnSummary":"...","groupVibe":"...","outfitChanges":[],"planCandidates":[{"title":"看电影","summary":"周末一起看电影","participantIndexes":[1,2],"location":"待定"}]}`
+{"messages":[{"speakerIndex":1,"speakerName":"...","type":"text","content":"...","thought":"...","mood":"..."}],"turnSummary":"...","groupVibe":"...","outfitChanges":[],"scheduleChanges":[],"locationChanges":[],"planCandidates":[{"title":"看电影","summary":"周末一起看电影","participantIndexes":[1,2],"location":"待定"}]}`
 }
 
 function parseSpeakerIndex(v: unknown): number | null {
@@ -442,6 +451,8 @@ export interface ParsedGroupTurn {
   groupVibe: string
   planCandidates: Array<{ title: string; summary: string; participantIndexes: number[]; location?: string }>
   outfitChanges: OutfitChangeProposal[]
+  scheduleChanges: ScheduleChangeProposal[]
+  locationChanges: LocationChangeProposal[]
 }
 
 export interface ParsedGroupRawDraft extends ParsedGroupTurn {
@@ -461,7 +472,7 @@ export function parseGroupRawDraft(raw: string, speakers: Contact[]): ParsedGrou
     turnSummary: '',
     groupVibe: '',
     planCandidates: [],
-    outfitChanges: [],
+      outfitChanges: [], scheduleChanges: [], locationChanges: [],
   }
   if (!raw.trim() || speakers.length === 0) return empty
   const speakerIndexByName = new Map(speakers.map((speaker, index) => [speaker.name, index + 1]))
@@ -492,7 +503,7 @@ export function parseGroupRawDraft(raw: string, speakers: Contact[]): ParsedGrou
     turnSummary: bubbles.map((bubble) => `${bubble.speakerName}：${bubble.content}`).join('；').slice(0, 180),
     groupVibe: '',
     planCandidates: [],
-    outfitChanges: [],
+    outfitChanges: [], scheduleChanges: [], locationChanges: [],
   }
 }
 
@@ -502,13 +513,15 @@ export function serializeGroupTurn(parsed: ParsedGroupTurn): string {
     turnSummary: parsed.turnSummary,
     groupVibe: parsed.groupVibe,
     outfitChanges: parsed.outfitChanges,
+    scheduleChanges: parsed.scheduleChanges,
+    locationChanges: parsed.locationChanges,
     planCandidates: parsed.planCandidates,
   })
 }
 
 export function parseGroupAiResponse(raw: string, speakerCount: number): ParsedGroupTurn {
   const trimmed = raw.trim()
-  if (!trimmed) return { bubbles: [], knowledgeQueries: [], turnSummary: '', groupVibe: '', planCandidates: [], outfitChanges: [] }
+  if (!trimmed) return { bubbles: [], knowledgeQueries: [], turnSummary: '', groupVibe: '', planCandidates: [], outfitChanges: [], scheduleChanges: [], locationChanges: [] }
 
   const jsonResult = tryParseGroupJson(trimmed, speakerCount)
   if (jsonResult && jsonResult.bubbles.length > 0) return jsonResult
@@ -518,7 +531,7 @@ export function parseGroupAiResponse(raw: string, speakerCount: number): ParsedG
     .map((line) => line.trim())
     .filter(Boolean)
     .map((content, i) => ({ speakerIndex: (i % speakerCount) + 1, type: 'text' as const, content }))
-  return { bubbles: fallbackBubbles, knowledgeQueries: [], turnSummary: fallbackBubbles.map((b) => b.content).join(' ').slice(0, 160), groupVibe: '群聊氛围暂未更新。', planCandidates: [], outfitChanges: [] }
+  return { bubbles: fallbackBubbles, knowledgeQueries: [], turnSummary: fallbackBubbles.map((b) => b.content).join(' ').slice(0, 160), groupVibe: '群聊氛围暂未更新。', planCandidates: [], outfitChanges: [], scheduleChanges: [], locationChanges: [] }
 }
 
 function tryParseGroupJson(trimmedRaw: string, speakerCount: number): ParsedGroupTurn | null {
@@ -559,6 +572,8 @@ function tryParseGroupJson(trimmedRaw: string, speakerCount: number): ParsedGrou
     turnSummary: typeof parsed.turnSummary === 'string' ? parsed.turnSummary.trim() : '',
     groupVibe: typeof parsed.groupVibe === 'string' ? parsed.groupVibe.trim() : '',
     outfitChanges: Array.isArray(parsed.outfitChanges) ? parsed.outfitChanges.map(parseOutfitChange).filter((item): item is OutfitChangeProposal => !!item).slice(0, speakerCount) : [],
+    scheduleChanges: Array.isArray(parsed.scheduleChanges) ? parsed.scheduleChanges.map(parseGroupScheduleChange).filter((item): item is ScheduleChangeProposal => !!item).slice(0, speakerCount) : [],
+    locationChanges: Array.isArray(parsed.locationChanges) ? parsed.locationChanges.map(parseLocationChange).filter((item): item is LocationChangeProposal => !!item).slice(0, speakerCount) : [],
     planCandidates: Array.isArray(parsed.planCandidates) ? parsed.planCandidates.flatMap((item: unknown) => {
       if (!item || typeof item !== 'object') return []
       const value = item as { title?: unknown; summary?: unknown; participantIndexes?: unknown; location?: unknown }
@@ -570,6 +585,16 @@ function tryParseGroupJson(trimmedRaw: string, speakerCount: number): ParsedGrou
         : []
     }).slice(0, 1) : [],
   }
+}
+
+function parseGroupScheduleChange(raw: unknown): ScheduleChangeProposal | undefined {
+  if (!raw || typeof raw !== 'object') return undefined
+  const value = raw as Record<string, unknown>
+  const startDay = Number(value.startDay ?? value.effectiveDay), endDay = Number(value.endDay ?? startDay)
+  const slots = Array.isArray(value.slots) ? value.slots.filter((slot): slot is 'morning'|'day'|'evening'|'night' => ['morning', 'day', 'evening', 'night'].includes(String(slot))) : (['morning', 'day', 'evening', 'night'].includes(String(value.slot)) ? [value.slot as 'morning'|'day'|'evening'|'night'] : undefined)
+  const sourceEventIds = Array.isArray(value.sourceEventIds) ? value.sourceEventIds.filter((id): id is string => typeof id === 'string' && !!id.trim()).slice(0, 8) : []
+  if (value.accepted !== true || typeof value.characterId !== 'string' || !Number.isInteger(Number(value.worldVersion)) || !Number.isInteger(startDay) || !Number.isInteger(endDay) || endDay < startDay || !slots?.length || typeof value.locationId !== 'string' || typeof value.activity !== 'string' || (value.phoneAccess !== 'available' && value.phoneAccess !== 'unavailable') || (value.priority !== 'override' && value.priority !== 'commitment') || !sourceEventIds.length || typeof value.reason !== 'string') return undefined
+  return { characterId: value.characterId.trim(), worldVersion: Number(value.worldVersion), startDay, endDay, slots, locationId: value.locationId.trim(), activity: value.activity.trim().slice(0, 120), phoneAccess: value.phoneAccess, priority: value.priority, sourceEventIds, reason: value.reason.trim().slice(0, 160), accepted: true }
 }
 
 /** Called when a contact is deleted — group membership shouldn't keep dangling references to a contact that no longer exists. */

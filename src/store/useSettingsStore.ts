@@ -20,6 +20,7 @@ export const useSettingsStore = create<SettingsState>()(
       model: 'deepseek-v4-pro',
       utilityModel: 'deepseek-v4-flash',
       globalSystemPrompt: DEFAULT_STYLE_PROMPT,
+      chatLiveliness: 'normal',
       userNickname: '我',
       userAvatar: '🙂',
       userGender: '',
@@ -55,7 +56,7 @@ export const useSettingsStore = create<SettingsState>()(
     }),
     {
       name: 'chatslg-settings',
-      version: 9,
+      version: 10,
       migrate: (persisted, version) => {
         const next = persisted as Partial<SettingsState>
         if (typeof next.userOccupation !== 'string') next.userOccupation = ''
@@ -72,6 +73,7 @@ export const useSettingsStore = create<SettingsState>()(
           next.contactCreatorMode = 'standard'
           delete (next as Record<string, unknown>).enabledModules
         }
+        if (!['quiet', 'normal', 'lively'].includes(String(next.chatLiveliness))) next.chatLiveliness = 'normal'
         return next
       },
     },

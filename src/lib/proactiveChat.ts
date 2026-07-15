@@ -1,7 +1,7 @@
 import { db } from '../db/db'
 import { triggerAiTurn } from './chatEngine'
 import { weightedSampleWithoutReplacement } from './groupChat'
-import { describeCurrentSchedule, isPhoneAvailable } from './schedule'
+import { describeCurrentWorldSchedule, isWorldPhoneAvailable } from './schedule'
 import { useSettingsStore } from '../store/useSettingsStore'
 import { toDateKey } from './time'
 import type { AppSettings, Contact, ProactiveTopicRecord } from '../types'
@@ -30,7 +30,7 @@ async function chooseTopic(contact: Contact): Promise<ProactiveTopicRecord | und
     else if (memory.importance >= 0.65) candidates.push({ topic: memory.content, source: 'memory' })
   }
   for (const plan of contact.upcomingPlans ?? []) candidates.push({ topic: plan.text, source: 'plan' })
-  const schedule = describeCurrentSchedule(contact, new Date())
+  const schedule = await describeCurrentWorldSchedule(contact.id)
   if (schedule) candidates.push({ topic: schedule, source: 'schedule' })
   if (contact.occupation) candidates.push({ topic: `${contact.occupation}相关的真实日常`, source: 'career' })
   candidates.push({ topic: '结合当前时间和自己的生活状态，发一句符合性格的轻量日常消息', source: 'casual' })
@@ -45,10 +45,11 @@ export async function maybeTriggerProactiveMessage(settings: AppSettings): Promi
     const contacts = await db.contacts.toArray()
     const conversations = await db.conversations.toArray()
     const byContact = new Map(conversations.filter((c) => c.contactId).map((c) => [c.contactId!, c]))
-    const eligible = contacts.filter((c) => {
+    const eligible = (await Promise.all(contacts.map(async (c) => {
       const conv = byContact.get(c.id)
-      return !!conv && now - conv.updatedAt >= settings.proactiveSilenceThresholdMs && (!c.lastProactiveMessageAt || now - c.lastProactiveMessageAt >= settings.proactiveCooldownMs) && isPhoneAvailable(c, new Date(now))
-    })
+      const allowed = !!conv && now - conv.updatedAt >= settings.proactiveSilenceThresholdMs && (!c.lastProactiveMessageAt || now - c.lastProactiveMessageAt >= settings.proactiveCooldownMs) && await isWorldPhoneAvailable(c.id)
+      return { contact: c, allowed }
+    }))).filter((row) => row.allowed).map((row) => row.contact)
     const [contact] = weightedSampleWithoutReplacement(eligible, 1)
     if (!contact) return
     const topic = await chooseTopic(contact)

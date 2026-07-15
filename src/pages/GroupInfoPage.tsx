@@ -16,11 +16,6 @@ import type { Contact, Group, GroupEnergyLevel, GroupPlan, GroupSpeakerLimit } f
 
 const EMPTY_CONTACTS: Contact[] = []
 const SPEAKER_LIMIT_OPTIONS: GroupSpeakerLimit[] = [2, 3, 4, 5, 'all']
-const ENERGY_OPTIONS: { value: GroupEnergyLevel; label: string; description: string }[] = [
-  { value: 'cold', label: '冷淡', description: '每个发言人回一句话' },
-  { value: 'normal', label: '普通', description: '每个发言人回2~3句话' },
-  { value: 'lively', label: '热闹', description: '每个发言人回4句话以上' },
-]
 
 function latestUsedIntents(contact: Contact) {
   return (contact.intentQueue ?? [])
@@ -123,7 +118,7 @@ export function GroupInfoPage() {
   const allContacts = useLiveQuery(() => db.contacts.toArray(), []) ?? EMPTY_CONTACTS
   const membersRaw = useLiveQuery(() => (group ? db.contacts.bulkGet(group.memberContactIds) : []), [group])
   const stickers: import('../types').Sticker[] = []
-  const members = useMemo(() => (membersRaw ?? []).filter((c): c is Contact => !!c), [membersRaw])
+  const members = useMemo(() => Array.from(new Map((membersRaw ?? []).filter((c): c is Contact => !!c).map((contact) => [contact.id, contact])).values()), [membersRaw])
 
   const addableContacts = useMemo(() => {
     if (!group) return []
@@ -148,7 +143,7 @@ export function GroupInfoPage() {
           groupMemoryText: group.memory,
           groupVibeText: group.vibe,
           allowAiChatter: group.allowAiChatter ?? true,
-          energyLevel: group.energyLevel ?? 'normal',
+          energyLevel: settings.chatLiveliness === 'quiet' ? 'cold' : settings.chatLiveliness === 'lively' ? 'lively' : 'normal',
           currentTimeText: describeCurrentTime(new Date()),
           userProfileText: buildUserProfileText(settings),
           targetedContextText: '【预览】这里会放入用户本轮@、回复对象等定向上下文。',
@@ -320,7 +315,8 @@ export function GroupInfoPage() {
         </section>
 
         <section className="mt-3 bg-white px-4 py-4">
-          <h3 className="mb-2 text-xs font-medium text-gray-400">群聊热闹程度</h3>
+          <h3 className="mb-2 text-xs font-medium text-gray-400">回复条数由全局“聊天热闹程度”统一控制</h3>
+          <p className="text-xs text-gray-500">请在“设置”中选择冷清（1–2条）、一般（3–4条）或热闹（5–6条）。</p>
           <div className="grid grid-cols-3 gap-2">
             {ENERGY_OPTIONS.map((option) => {
               const checked = (group.energyLevel ?? 'normal') === option.value
@@ -512,3 +508,5 @@ export function GroupInfoPage() {
     </div>
   )
 }
+// Per-group reply volume was replaced by the global chat liveliness setting.
+const ENERGY_OPTIONS: { value: GroupEnergyLevel; label: string; description: string }[] = []

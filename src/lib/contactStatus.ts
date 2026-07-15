@@ -1,4 +1,4 @@
-import { describeCurrentSchedule } from './schedule'
+import { describeCurrentWorldSchedule } from './schedule'
 import { normalizeMood } from './mood'
 import type { Contact } from '../types'
 
@@ -8,8 +8,8 @@ function activeMood(contact: Contact, now: number): string {
   return normalizeMood(contact.mood.text)
 }
 
-function compactSchedule(contact: Contact, now: Date): string {
-  const text = describeCurrentSchedule(contact, now)
+async function compactSchedule(contact: Contact): Promise<string> {
+  const text = await describeCurrentWorldSchedule(contact.id)
   return text.replace(/^现在/, '').trim()
 }
 
@@ -17,7 +17,7 @@ export async function buildPrivateStatusLine(contact: Contact, now = new Date())
   const parts: string[] = []
   const mood = activeMood(contact, now.getTime())
   if (mood) parts.push(mood)
-  const schedule = compactSchedule(contact, now)
+  const schedule = await compactSchedule(contact)
   parts.push(schedule || '空闲')
   return parts.join(' · ')
 }
@@ -30,11 +30,11 @@ export async function buildGroupStatusLine(members: Contact[], now = new Date())
     })
     .filter(Boolean)
     .slice(0, 2)
-  const busy = members
-    .map((m) => {
-      const schedule = compactSchedule(m, now)
+  const busy = (await Promise.all(members
+    .map(async (m) => {
+      const schedule = await compactSchedule(m)
       return schedule ? `${m.name}${schedule}` : ''
-    })
+    })))
     .filter(Boolean)
     .slice(0, 1)
   return [...moods, ...busy].filter(Boolean).slice(0, 3).join(' · ')

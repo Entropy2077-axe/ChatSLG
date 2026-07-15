@@ -33,6 +33,7 @@ const SaveLoadPage = page(() => import('./pages/SaveLoadPage'), 'SaveLoadPage')
 const SkyEyePage = page(() => import('./pages/SkyEyePage'), 'SkyEyePage')
 const SocialInboxPage = page(() => import('./pages/SocialInboxPage'), 'SocialInboxPage')
 const SceneArchivePage = page(() => import('./pages/SceneArchivePage'), 'SceneArchivePage')
+const TimePage = page(() => import('./pages/TimePage'), 'TimePage')
 const NewWorldPage = page(() => import('./pages/NewWorldPage'), 'NewWorldPage')
 // Runs once at module load, regardless of admin mode — so there's already
 // log history by the time someone opens "天眼".
@@ -103,6 +104,7 @@ function App() {
           <Route path="/phone/moments" element={<MomentsPage />} />
           <Route path="/dialogue" element={<DialoguePage />} />
           <Route path="/locations" element={<WorldPage />} />
+          <Route path="/time" element={<TimePage />} />
           <Route path="/me" element={<Navigate to="/phone" replace />} />
         </Route>
         <Route path="/contacts" element={<ContactsPage />} />

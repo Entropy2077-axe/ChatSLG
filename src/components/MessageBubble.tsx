@@ -45,6 +45,13 @@ export const MessageBubble = forwardRef<HTMLDivElement, MessageBubbleProps>(func
 ) {
   const isUser = message.role === 'user'
   const longPress = useLongPress(() => onLongPress?.())
+  if (message.type === 'systemState' && message.systemState) {
+    const state = message.systemState
+    const range = state.startDay === state.endDay ? `第${state.startDay}天` : `第${state.startDay}–${state.endDay}天`
+    const slots = state.slots?.length ? ` · ${state.slots.map((slot) => ({ morning: '早晨', day: '白天', evening: '傍晚', night: '夜晚' }[slot])).join('、')}` : ' · 全天'
+    const title = state.kind === 'outfit' ? `${state.contactName} 已变更衣着` : state.kind === 'schedule' ? `${state.contactName} 已变更日程` : state.kind === 'outfitRestored' ? `${state.contactName} 已恢复默认衣着` : `${state.contactName} 已恢复基础日程`
+    return <div ref={ref} className="px-7 py-2"><div className="rounded-xl border border-violet-100 bg-violet-50 px-3 py-2 text-[12px] text-violet-900"><p className="font-medium">{title}</p><p className="mt-0.5 text-violet-700">{state.state === 'upcoming' ? `将在第${state.startDay}天开始生效` : state.state === 'restored' ? '有效期结束，已恢复默认状态' : `现已生效 · ${range}${slots}`}</p>{state.kind === 'outfit' && <p className="mt-1 text-violet-800">{state.outfit ? `当前衣着：${Object.values(state.outfit).filter((value) => typeof value === 'string').join(' · ')}` : `变更部位：${Object.entries(state.patch ?? {}).map(([key, value]) => `${key}：${value}`).join(' · ')}`}</p>}{state.kind === 'schedule' && <p className="mt-1 text-violet-800">{state.locationName} · {state.activity} · {state.phoneAccess === 'unavailable' ? '暂不方便看手机' : '可使用手机'}</p>}</div></div>
+  }
   return (
     <div
       ref={ref}

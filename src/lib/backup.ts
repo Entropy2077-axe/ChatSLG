@@ -24,6 +24,7 @@ export const BACKUP_TABLES = [
   'walletAccounts', 'walletTransactions', 'loans', 'jobListings', 'interviews', 'groupPlans', 'adminLogs', 'adminAiTraces', 'savedPersonas',
   'worldState', 'locations', 'acousticEdges', 'characterSchedules', 'appointments', 'worldEvents', 'perceivedEvents', 'characterDiaries', 'pendingPhoneMessages',
   'worldMaps',
+  'outfitConstraints', 'scheduleConstraints',
 ] as const
 
 export type BackupTableName = (typeof BACKUP_TABLES)[number]

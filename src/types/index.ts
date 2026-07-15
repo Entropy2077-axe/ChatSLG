@@ -64,6 +64,8 @@ export interface Contact {
   currentLocationId?: string
   /** Persistent authoritative clothing state. It never expires like mood. */
   outfit?: OutfitState
+  /** The persona's normal clothing. Temporary chat constraints never overwrite this. */
+  defaultOutfit?: OutfitState
 }
 
 /** A recurring weekly time block — generated once at contact creation alongside the persona, not user-editable directly. */
@@ -265,6 +267,23 @@ export interface Conversation {
   archiveSlot?: TimeSlot
   archiveLocationId?: string
   archivedAtStep?: number
+  /** Small semantic ledger used by the 8K utility model to resolve later
+   * replies such as “嗯，走吧” without rereading a long raw transcript. */
+  pendingStateIntents?: PendingStateIntent[]
+}
+
+export interface PendingStateIntent {
+  id: string
+  characterId: string
+  kind: 'outfit' | 'schedule' | 'location'
+  summary: string
+  sourceEventIds: string[]
+  locationId?: string
+  outfitPatch?: Partial<Record<OutfitPart, string>>
+  startDay?: number
+  endDay?: number
+  slots?: TimeSlot[]
+  createdAt: number
 }
 
 /** A group chat: still just one LLM call per turn simulating multiple personas (see groupChat.ts), not real independent AI-to-AI agents. */
@@ -302,8 +321,8 @@ export interface GroupPlan {
   resolvedAt?: number
 }
 
-export type MessageRole = 'user' | 'assistant'
-export type MessageType = 'text' | 'sticker' | 'image' | 'link' | 'gift' | 'scheduleChange' | 'groupPlan' | 'transfer' | 'redPacket' | 'loanRequest' | 'loanResult' | 'repayment'
+export type MessageRole = 'user' | 'assistant' | 'system'
+export type MessageType = 'text' | 'sticker' | 'image' | 'link' | 'gift' | 'scheduleChange' | 'systemState' | 'groupPlan' | 'transfer' | 'redPacket' | 'loanRequest' | 'loanResult' | 'repayment'
 export type GroupSpeakerLimit = 2 | 3 | 4 | 5 | 'all'
 export type GroupEnergyLevel = 'cold' | 'normal' | 'lively'
 
@@ -335,6 +354,22 @@ export interface ScheduleChangePayload {
   location?: string
 }
 
+export interface SystemStatePayload {
+  kind: 'outfit' | 'schedule' | 'outfitRestored' | 'scheduleRestored'
+  contactId: string
+  contactName: string
+  startDay: number
+  endDay: number
+  slots?: TimeSlot[]
+  state: 'active' | 'upcoming' | 'restored'
+  patch?: Partial<Record<OutfitPart, string>>
+  outfit?: OutfitState
+  locationId?: string
+  locationName?: string
+  activity?: string
+  phoneAccess?: 'available' | 'unavailable'
+}
+
 export interface Message {
   id: string
   conversationId: string
@@ -347,6 +382,7 @@ export interface Message {
   gift?: GiftPayload
   image?: { url: string; caption?: string; photographer?: string; photographerUrl?: string; query?: string }
   scheduleChange?: ScheduleChangePayload
+  systemState?: SystemStatePayload
   groupPlanId?: string
   finance?: FinanceMessagePayload
   bubbleGroupId?: string // groups bubbles emitted from one AI response
@@ -355,6 +391,11 @@ export interface Message {
   debugRawAiResponse?: string // admin mode only: raw JSON/text returned by the AI for the turn that produced this bubble
   debugParsedBubble?: AiBubble | GroupAiBubble // admin mode only: parsed bubble payload used to render this message
   thought?: string // AI's private thought for this turn — only shown when 读心 module is enabled
+  /** Once this message has successfully produced a hard-state mutation it is
+   * permanently excluded from future state-adjudication history. The normal
+   * chat model may still read it for conversational continuity. */
+  consumedStateKinds?: Array<'outfit' | 'schedule' | 'location'>
+  stateConsumedAt?: number
   createdAt: number
   pending?: boolean // true while an assistant bubble is still "typing" (not yet delivered)
 }
@@ -412,6 +453,8 @@ export interface AppSettings {
   model: string
   utilityModel: string // model for secondary tasks: shop generation, warmth scoring / memory updates, worldview drafts, etc.
   globalSystemPrompt: string
+  /** Controls the total number of ordinary AI bubbles per user turn. */
+  chatLiveliness?: 'quiet' | 'normal' | 'lively'
   userNickname: string
   userAvatar: string
   userGender: string
@@ -463,7 +506,7 @@ export interface AppSettings {
 }
 
 export interface AdminLogRecord { id: string; level: 'log' | 'info' | 'warn' | 'error'; message: string; createdAt: number }
-export type AdminAiTraceStage = 'first_chat' | 'first_quality' | 'second_chat' | 'other' | 'second_quality'
+export type AdminAiTraceStage = 'first_chat' | 'first_quality' | 'second_chat' | 'other' | 'second_quality' | 'state'
 export interface AdminAiTrace {
   id: string
   purpose: AiUsagePurpose
@@ -652,7 +695,43 @@ export interface OutfitChangeProposal {
   sourceEventIds: string[]
   sourceScheduleId?: string
   reason: string
+  accepted?: boolean
+  startDay?: number
+  endDay?: number
+  slots?: TimeSlot[]
 }
+
+export interface OutfitConstraint {
+  id: string
+  characterId: string
+  startDay: number
+  endDay: number
+  slots?: TimeSlot[]
+  patch: Partial<Record<OutfitPart, string>>
+  sourceEventIds: string[]
+  reason: string
+  conversationId: string
+  createdAt: number
+  expiredNotified?: boolean
+}
+
+export interface ScheduleConstraint {
+  id: string
+  characterId: string
+  startDay: number
+  endDay: number
+  slots?: TimeSlot[]
+  locationId: string
+  activity: string
+  phoneAccess: 'available' | 'unavailable'
+  priority: 'override' | 'commitment'
+  sourceEventIds: string[]
+  reason: string
+  conversationId: string
+  createdAt: number
+  expiredNotified?: boolean
+}
+
 
 export interface AcousticEdge {
   id: string
@@ -680,14 +759,18 @@ export interface CharacterSchedule {
 export interface ScheduleChangeProposal {
   characterId: string
   worldVersion: number
-  effectiveDay: number
-  slot: TimeSlot
+  effectiveDay?: number
+  slot?: TimeSlot
+  startDay?: number
+  endDay?: number
+  slots?: TimeSlot[]
   locationId: string
   activity: string
   phoneAccess: 'available' | 'unavailable'
   priority: 'override' | 'commitment'
   sourceEventIds: string[]
   reason: string
+  accepted?: boolean
 }
 
 export interface Appointment {
@@ -763,12 +846,16 @@ export interface AiBubbleScheduleChange {
   worldVersion: number
   effectiveDay: number
   slot: TimeSlot
+  startDay?: number
+  endDay?: number
+  slots?: TimeSlot[]
   locationId: string
   phoneAccess: 'available' | 'unavailable'
   activity: string
   summary: string
   priority: 'override' | 'commitment'
   reason: string
+  accepted?: boolean
 }
 export interface AiBubbleFinance {
   type: 'transfer' | 'redPacket' | 'loanRequest' | 'loanDecision' | 'giftPurchase'
@@ -904,6 +991,16 @@ export interface AiResponse {
   /** Private thought — what the AI really thinks vs what it says. Required. */
   thought: string
   outfitChange?: OutfitChangeProposal
+  locationChange?: LocationChangeProposal
+}
+
+/** A chat-grounded, immediate movement made by the speaking AI. */
+export interface LocationChangeProposal {
+  characterId: string
+  worldVersion: number
+  locationId: string
+  sourceEventIds: string[]
+  reason: string
 }
 
 // ---- group chat AI output protocol (see lib/groupChat.ts) ----
@@ -926,4 +1023,6 @@ export interface GroupAiResponse {
   memoryCandidates?: { contactName: string; content: string }[]
   knowledgeQueries?: string[]
   outfitChanges?: OutfitChangeProposal[]
+  scheduleChanges?: ScheduleChangeProposal[]
+  locationChanges?: LocationChangeProposal[]
 }

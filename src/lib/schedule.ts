@@ -1,6 +1,9 @@
 import { v4 as uuid } from 'uuid'
 import { WEEKDAYS, toDateKey } from './time'
 import type { Contact, ScheduleBlock, ScheduleOverride } from '../types'
+import { db } from '../db/db'
+import { ensureWorldInitialized, resolveSchedule } from './world'
+import { resolveScheduleConstraint } from './temporaryConstraints'
 
 type ScheduleSource = Pick<Contact, 'schedule' | 'scheduleOverrides'>
 
@@ -43,6 +46,29 @@ export function describeCurrentSchedule(contact: ScheduleSource, now: Date): str
   const block = findBlockForNow(contact.schedule ?? [], now)
   if (!block) return ''
   return `现在在${block.activity}`
+}
+
+/** Runtime schedule authority for the world simulation. Legacy Contact.schedule
+ * is intentionally not consulted here. */
+export async function currentWorldSchedule(contactId: string) {
+  const world = await ensureWorldInitialized()
+  const [schedules, constraints] = await Promise.all([
+    db.characterSchedules.where('characterId').equals(contactId).toArray(),
+    db.scheduleConstraints.where('characterId').equals(contactId).toArray(),
+  ])
+  const constraint = resolveScheduleConstraint(constraints, world.day, world.slot)
+  if (constraint) return { world, schedule: { ...constraint, id: constraint.id, characterId: contactId, effectiveDay: world.day, slot: world.slot, sourceEventIds: constraint.sourceEventIds, createdAt: constraint.createdAt } }
+  return { world, schedule: resolveSchedule(schedules, world.day, world.slot) }
+}
+
+export async function isWorldPhoneAvailable(contactId: string): Promise<boolean> {
+  const { schedule } = await currentWorldSchedule(contactId)
+  return schedule?.phoneAccess !== 'unavailable'
+}
+
+export async function describeCurrentWorldSchedule(contactId: string): Promise<string> {
+  const { schedule } = await currentWorldSchedule(contactId)
+  return schedule ? `现在在${schedule.activity}` : ''
 }
 
 /** Next-3-days digest of the recurring schedule + any overrides, for the model to reason against when negotiating a schedule change. */

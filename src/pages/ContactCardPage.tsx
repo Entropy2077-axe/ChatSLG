@@ -30,6 +30,7 @@ import { formatCurrency } from '../lib/wallet'
 import { setWalletBalance } from '../lib/finance'
 import { slotLabel } from '../lib/world'
 import { commitScheduleAdaptation, generateScheduleAdaptation } from '../lib/scheduleAdaptation'
+import { resolveCurrentOutfit, resolveScheduleConstraint } from '../lib/temporaryConstraints'
 
 function LatestAiTurnJson({ contactId }: { contactId: string }) {
   const latestTurn = useLiveQuery(async () => {
@@ -100,6 +101,8 @@ export function ContactCardPage() {
     () => (contactId ? db.characterSchedules.where('characterId').equals(contactId).toArray() : []),
     [contactId],
   ) ?? []
+  const outfitConstraints = useLiveQuery(() => contactId ? db.outfitConstraints.where('characterId').equals(contactId).toArray() : [], [contactId]) ?? []
+  const scheduleConstraints = useLiveQuery(() => contactId ? db.scheduleConstraints.where('characterId').equals(contactId).toArray() : [], [contactId]) ?? []
   const appointments = useLiveQuery(
     () => (contactId ? db.appointments.filter((item) => item.participantIds.includes(contactId)).toArray() : []),
     [contactId],
@@ -231,6 +234,10 @@ export function ContactCardPage() {
         .filter((item) => item.slot === worldState.slot && (item.effectiveDay === undefined || item.effectiveDay === worldState.day))
         .sort((a, b) => ({ commitment: 3, override: 2, base: 1 }[b.priority] - { commitment: 3, override: 2, base: 1 }[a.priority]))[0]
     : undefined
+  const currentOutfit = worldState ? resolveCurrentOutfit(contact, outfitConstraints, worldState.day, worldState.slot) : (contact.outfit ?? defaultOutfit(contact.createdAt))
+  const currentTemporarySchedule = worldState ? resolveScheduleConstraint(scheduleConstraints, worldState.day, worldState.slot) : undefined
+  const upcomingOutfit = outfitConstraints.filter((item) => !worldState || item.startDay > worldState.day).sort((a, b) => a.startDay - b.startDay)[0]
+  const upcomingSchedule = scheduleConstraints.filter((item) => !worldState || item.startDay > worldState.day).sort((a, b) => a.startDay - b.startDay)[0]
 
   // Admin-mode-only: shows exactly what would be sent as the system prompt
   // right now, for debugging persona/relationship issues. Mirrors
@@ -358,8 +365,9 @@ export function ContactCardPage() {
       </div>
 
       <section className="mt-3 bg-white px-4 py-4">
-        <h3 className="mb-3 text-xs font-medium text-gray-400">当前衣着 · 持久状态</h3>
-        <div className="grid grid-cols-2 gap-x-4 gap-y-3">{OUTFIT_FIELDS.map(([key, label]) => <div key={key}><p className="text-[11px] text-gray-400">{label}</p><p className="mt-0.5 text-sm text-gray-700">{(contact.outfit ?? defaultOutfit(0))[key]}</p></div>)}</div>
+        <div className="mb-3 flex items-center justify-between"><h3 className="text-xs font-medium text-gray-400">当前衣着</h3><span className="text-[10px] text-violet-600">{outfitConstraints.some((item) => worldState && item.startDay <= worldState.day && item.endDay >= worldState.day) ? '当前临时约束' : '默认衣着'}</span></div>
+        <div className="grid grid-cols-2 gap-x-4 gap-y-3">{OUTFIT_FIELDS.map(([key, label]) => <div key={key}><p className="text-[11px] text-gray-400">{label}</p><p className="mt-0.5 text-sm text-gray-700">{currentOutfit[key]}</p></div>)}</div>
+        {upcomingOutfit && <p className="mt-3 text-xs text-violet-600">即将生效：第{upcomingOutfit.startDay}–{upcomingOutfit.endDay}天{upcomingOutfit.slots?.length ? ` · ${upcomingOutfit.slots.map(slotLabel).join('、')}` : ' · 全天'}</p>}
       </section>
 
       <section className="mt-3 bg-white px-4 py-4">
@@ -435,6 +443,8 @@ export function ContactCardPage() {
 
       <section className="mt-3 bg-white px-4 py-4">
         <div className="mb-2 flex items-center justify-between"><h3 className="text-xs font-medium text-gray-400">世界日程</h3><button onClick={() => void adaptSchedule()} disabled={adaptingSchedule} className="text-xs text-violet-600 disabled:opacity-50">{adaptingSchedule ? '适配中…' : '重新适配基础日程'}</button></div>
+        {currentTemporarySchedule && <p className="mb-2 rounded-lg bg-violet-50 px-2.5 py-2 text-xs text-violet-700">当前临时约束 · 第{currentTemporarySchedule.startDay}–{currentTemporarySchedule.endDay}天 · {locationById.get(currentTemporarySchedule.locationId)?.name || currentTemporarySchedule.locationId} · {currentTemporarySchedule.activity}</p>}
+        {upcomingSchedule && <p className="mb-2 text-xs text-violet-600">即将生效：第{upcomingSchedule.startDay}–{upcomingSchedule.endDay}天 · {upcomingSchedule.activity}</p>}
         {worldSchedules.length === 0 ? (
           <p className="text-sm text-gray-400">暂无日程。角色不会凭空移动。</p>
         ) : (

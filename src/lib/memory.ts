@@ -11,8 +11,10 @@ import type { AppSettings, Contact, ContactMemory, ContactMemoryScope, ContactRe
 /** How many *new* messages accumulate before we bother refreshing memory. Keeps the extra API call rare. */
 export const MEMORY_UPDATE_INTERVAL = 10
 
-/** How many of the most recent messages get sent verbatim to the main chat call. */
-export const CONTEXT_WINDOW_SIZE = 30
+/** Recent dialogue stays verbatim; older material reaches the main model via
+ * utility-produced structured/contact/group memory. Keeping this window
+ * modest cuts expensive main-model input without compressing the live turn. */
+export const CONTEXT_WINDOW_SIZE = 16
 
 /** Bounds how many upcoming plans a contact can accumulate. */
 const MAX_UPCOMING_PLANS = 8

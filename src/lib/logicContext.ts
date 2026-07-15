@@ -7,6 +7,7 @@ import type {
   Message, PerceivedEvent, PendingPhoneMessage, WorldbookEntry,
 } from '../types'
 import { outfitText } from './outfit'
+import { activeInRange } from './temporaryConstraints'
 import { recentConversationMessages } from './conversationStats'
 
 export interface CharacterLogicState {
@@ -52,13 +53,21 @@ function personaText(contact: Contact): string {
   ].filter(Boolean).join('\n')
 }
 
-async function characterState(contact: Contact, appointments: Appointment[]): Promise<CharacterLogicState> {
-  const schedules = await db.characterSchedules.where('characterId').equals(contact.id).toArray()
+async function characterState(contact: Contact, appointments: Appointment[], day: number, slot: import('../types').TimeSlot): Promise<CharacterLogicState> {
+  const [schedules, constraints] = await Promise.all([
+    db.characterSchedules.where('characterId').equals(contact.id).toArray(),
+    db.scheduleConstraints.where('characterId').equals(contact.id).toArray(),
+  ])
+  const activeConstraints = constraints.filter((item) => activeInRange(item, day, slot)).map((item) => ({
+    id: item.id, characterId: item.characterId, effectiveDay: day, slot,
+    locationId: item.locationId, activity: item.activity, phoneAccess: item.phoneAccess,
+    priority: item.priority, sourceEventIds: item.sourceEventIds, createdAt: item.createdAt,
+  }))
   return {
     character: contact,
     currentLocationId: contact.currentLocationId || 'home-living',
     baseSchedule: schedules.filter((item) => item.priority === 'base'),
-    scheduleOverrides: schedules.filter((item) => item.priority !== 'base'),
+    scheduleOverrides: [...schedules.filter((item) => item.priority !== 'base'), ...activeConstraints],
     commitments: appointments.filter((item) => item.participantIds.includes(contact.id) && item.status === 'planned'),
   }
 }
@@ -78,8 +87,8 @@ export async function buildLogicContext(opts: {
   const participantIds = [...new Set((opts.participantIds ?? []).filter((id) => id !== subject.id))]
   const participantContacts = (await db.contacts.bulkGet(participantIds)).filter((item): item is Contact => !!item)
   const [subjectState, participantStates, memories, perceivedEvents, recentMessages, worldbook] = await Promise.all([
-    characterState(subject, appointments),
-    Promise.all(participantContacts.map((item) => characterState(item, appointments))),
+    characterState(subject, appointments, world.day, world.slot),
+    Promise.all(participantContacts.map((item) => characterState(item, appointments, world.day, world.slot))),
     db.contactMemories.where('contactId').equals(subject.id).toArray(),
     db.perceivedEvents
       .where('[characterId+observedAtStep]')
@@ -176,11 +185,13 @@ export function formatActionContext(bundle: LogicContextBundle): string {
   const scheduleLine = (item: CharacterSchedule) =>
     `${item.priority}:${item.dayOfWeek ?? `第${item.effectiveDay}天`}/${item.slot}@${item.locationId} ${item.activity} 手机${item.phoneAccess}`
   return `【结构动作硬状态】
+characterId=${state.character.id}；角色名=${state.character.name}
 worldVersion=${bundle.worldVersion}；当前第${bundle.clock.day}天/${bundle.clock.slot}；用户位置=${bundle.playerLocationId}；角色位置=${state.currentLocationId}
 合法叶子地点ID：${legalLocations || '无'}
 基础日程：${state.baseSchedule.map(scheduleLine).join('；') || '无'}
 高优先级日程：${state.scheduleOverrides.map(scheduleLine).join('；') || '无'}
 明确约会：${state.commitments.map((item) => `${item.id}:第${item.day}天/${item.slot}@${item.locationId} ${item.description}`).join('；') || '无'}
 角色当前衣着：${outfitText(state.character.outfit)}
+衣着patch六部位：head=发型/帽子等头部主体；top=上装；bottom=下装；outerwear=外套；footwear=鞋袜；accessories=蝴蝶结、发箍、发卡、耳饰、项链、围巾、领带、手表、眼镜等配饰
 实际感知事件：${bundle.perceivedEventText || '无'}`
 }
