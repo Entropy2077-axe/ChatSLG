@@ -9,6 +9,7 @@ import {
 import { chatCompletion } from './deepseek'
 import { pickAvatarCategory } from './avatarCategory'
 import { randomAnimeAvatar, searchPexelsPhoto } from './photoSearch'
+import { archivePexelsImage } from './mediaAssets'
 import { buildPersonaGenerationPrompt, parsePersonaGeneration } from './prompt'
 import { ensureWorldInitialized, formatLocationTree } from './world'
 import { retrieveWorldbookContext } from './worldbook'
@@ -238,7 +239,8 @@ async function processJob(job: ContactCreationJob) {
         playerLocationId: world.playerLocationId,
       }
     store.updateJob(job.id, { status: 'saving', draft })
-    await commitGeneratedContact(job, draft)
+    const contactId = await commitGeneratedContact(job, draft)
+    if (avatarPhotographer && finalAvatar) await archivePexelsImage({ ownerContactId: contactId, origin: 'avatar', originId: contactId, url: finalAvatar, photographer: avatarPhotographer, photographerUrl: avatarPhotographerUrl })
     store.removeJob(job.id)
   } catch (error) {
     store.updateJob(job.id, { status: 'failed', error: error instanceof Error ? error.message : String(error) })

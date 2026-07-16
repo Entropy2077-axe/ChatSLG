@@ -653,10 +653,11 @@ ${stylePrompt}${speechSamplesLine}
   - 金钱标记会真实扣除你的余额，必须结合关系、理由和余额慎重决定，不能虚构余额或无理由频繁送钱
   - 不要输出JSON 就正常打字聊天`
 
+  const imageRule = `【发送图片】你可以发送自拍、镜子自拍、穿搭照、物品照或现场照。只有用户在最近对话中明确表示想看，而且你本人明确同意现在发送时，才单独输出标记：[image:selfie|mirror_selfie|outfit|object|scene:portrait|square|landscape:normal|private:不超过100字的画面描述]。把标记放在希望图片出现的位置。拒绝、犹豫、以后再说或用户未索图时绝不能输出。标记不是聊天正文。`
   return {
     logic,
     feeling,
-    full: `${logic}\n\n${feeling}`,
+    full: `${logic}\n\n${feeling}\n\n${imageRule}`,
   }
 }
 

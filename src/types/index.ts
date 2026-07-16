@@ -64,6 +64,9 @@ export interface Contact {
   outfit?: OutfitState
   /** The persona's normal clothing. Temporary chat constraints never overwrite this. */
   defaultOutfit?: OutfitState
+  /** Stable text-only visual identity used by image generators; clothing is deliberately excluded. */
+  visualIdentity?: string
+  visualSeed?: number
 }
 
 /** Retired real-clock schedule shape, retained only so old saves can still be imported. */
@@ -196,6 +199,34 @@ export interface Moment {
   imageUrl?: string
   imagePhotographer?: string
   imagePhotographerUrl?: string
+  mediaAssetId?: string
+}
+
+export type MediaAssetSource = 'atlas' | 'pexels' | 'upload'
+export type MediaAssetOrigin = 'chat' | 'moment' | 'avatar'
+export type MediaAssetStatus = 'queued' | 'generating' | 'completed' | 'failed'
+export interface MediaAsset {
+  id: string
+  ownerContactId?: string
+  source: MediaAssetSource
+  origin: MediaAssetOrigin
+  originId: string
+  status: MediaAssetStatus
+  remoteUrl?: string
+  dataUrl?: string
+  width?: number
+  height?: number
+  modelId?: string
+  seed?: number
+  prompt?: string
+  predictionId?: string
+  error?: string
+  sensitive?: boolean
+  photographer?: string
+  photographerUrl?: string
+  createdAt: number
+  completedAt?: number
+  deletedAt?: number
 }
 
 export interface MomentComment {
@@ -382,7 +413,7 @@ export interface Message {
   replyToMessageId?: string // group chats: message id this message is replying to
   link?: LinkPayload
   gift?: GiftPayload
-  image?: { url: string; caption?: string; photographer?: string; photographerUrl?: string; query?: string }
+  image?: { url?: string; assetId?: string; caption?: string; photographer?: string; photographerUrl?: string; query?: string; status?: MediaAssetStatus; aspectRatio?: string; sensitive?: boolean }
   scheduleChange?: ScheduleChangePayload
   systemState?: SystemStatePayload
   groupPlanId?: string
@@ -487,6 +518,14 @@ export interface AppSettings {
   automaticAiDailyCap: number
   // ---- photo avatars/moments images (see lib/photoSearch.ts) ----
   pexelsApiKey: string // used for landscape/pet/person-photo categories; anime category uses waifu.pics which needs no key
+  atlasApiKey: string
+  atlasImageEnabled: boolean
+  atlasImageModel: string
+  imageVisualStyle: 'realistic' | 'anime'
+  realisticFacePreference: 'auto' | 'east_asian' | 'western'
+  imageDailyLimit: number
+  showPrivateImages: boolean
+  momentsAiImagesEnabled: boolean
   // ---- worldview (see lib/prompt.ts buildWorldviewDraftPrompt) ----
   worldview: string // shared world-setting text injected into every persona's prompt (chat, group chat, moments) once confirmed; empty until the user sets one
   worldbookMigrationCompleted?: boolean
@@ -890,6 +929,14 @@ export interface AiBubbleFinance {
   description?: string
   thought?: string
 }
+export interface AiBubbleImage {
+  type: 'image'
+  kind: 'selfie' | 'mirror_selfie' | 'outfit' | 'object' | 'scene'
+  scene: string
+  aspectRatio?: 'portrait' | 'square' | 'landscape'
+  sensitive?: boolean
+  thought?: string
+}
 
 export interface WorldbookEntry {
   id: string
@@ -1007,7 +1054,7 @@ export interface ProactiveTopicRecord {
   source: 'event' | 'open_thread' | 'memory' | 'plan' | 'schedule' | 'career' | 'casual'
   createdAt: number
 }
-export type AiBubble = AiBubbleText | AiBubbleLink | AiBubbleScheduleChange | AiBubbleFinance
+export type AiBubble = AiBubbleText | AiBubbleLink | AiBubbleScheduleChange | AiBubbleFinance | AiBubbleImage
 
 export interface AiResponse {
   messages: AiBubble[]

@@ -44,6 +44,7 @@ export function PhonePage() {
   }
 
   const apps: PhoneApp[] = [
+    { label: '相册', icon: '🖼️', color: 'bg-purple-500', to: '/album' },
     { label: '消息', icon: '💬', color: 'bg-emerald-500', badge: messageUnread, to: '/phone/messages' },
     { label: '联系人', icon: '👥', color: 'bg-cyan-500', to: '/contacts' },
     { label: '朋友圈', icon: '🌄', color: 'bg-sky-500', badge: momentUnread, to: '/phone/moments' },

@@ -151,13 +151,13 @@ test('settings page exports a complete ChatSLG backup json', async ({ page }) =>
 
   const backup = JSON.parse(await import('node:fs/promises').then((fs) => fs.readFile(path!, 'utf8')))
   expect(backup.format).toBe('chatslg-backup')
-  expect(backup.schemaVersion).toBe(5)
+  expect(backup.schemaVersion).toBe(6)
   expect(backup.settings.userNickname).toBe('Backup User')
   expect(backup.tables.contacts).toHaveLength(1)
   expect(backup.tables.conversations).toHaveLength(1)
   expect(backup.tables.messages).toHaveLength(1)
   expect(Object.keys(backup.tables)).toEqual(
-    expect.arrayContaining(['moments', 'savedWorldviews', 'worldbookEntries', 'worldMaps']),
+    expect.arrayContaining(['moments', 'savedWorldviews', 'worldbookEntries', 'worldMaps', 'mediaAssets']),
   )
 })
 

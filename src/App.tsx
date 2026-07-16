@@ -36,6 +36,7 @@ const SocialInboxPage = page(() => import('./pages/SocialInboxPage'), 'SocialInb
 const SceneArchivePage = page(() => import('./pages/SceneArchivePage'), 'SceneArchivePage')
 const TimePage = page(() => import('./pages/TimePage'), 'TimePage')
 const NewWorldPage = page(() => import('./pages/NewWorldPage'), 'NewWorldPage')
+const AlbumPage = page(() => import('./pages/AlbumPage'), 'AlbumPage')
 // Runs once at module load, regardless of admin mode — so there's already
 // log history by the time someone opens "天眼".
 installConsoleCapture()
@@ -72,9 +73,12 @@ function App() {
   const themeMode = useSettingsStore((s) => s.themeMode ?? 'light')
   const animationsEnabled = useSettingsStore((s) => s.animationsEnabled ?? true)
   const adminModeEnabled = useSettingsStore((s) => s.adminModeEnabled)
+  const atlasImageEnabled = useSettingsStore((s) => s.atlasImageEnabled)
+  const atlasApiKey = useSettingsStore((s) => s.atlasApiKey)
   const location = useLocation()
   useEffect(() => { void import('./lib/world').then(({ ensureWorldInitialized }) => ensureWorldInitialized()) }, [])
   useEffect(() => { void import('./lib/worldbook').then(({ ensureLegacyWorldviewMigrated }) => ensureLegacyWorldviewMigrated()) }, [])
+  useEffect(() => { if (atlasImageEnabled && atlasApiKey) void import('./lib/atlasImage').then(({ resumeAtlasGenerations }) => resumeAtlasGenerations(useSettingsStore.getState())) }, [atlasImageEnabled, atlasApiKey])
 
   useEffect(() => {
     document.documentElement.dataset.theme = themeMode
@@ -119,6 +123,7 @@ function App() {
         <Route path="/settings/mind-reading" element={<MindReadingSettingsPage />} />
         <Route path="/settings/scene-archives" element={<SceneArchivePage />} />
         <Route path="/new-world" element={<NewWorldPage />} />
+        <Route path="/album" element={<AlbumPage />} />
         <Route path="/stickers" element={<Navigate to="/phone" replace />} />
         <Route path="/profile/edit" element={<ProfileEditPage />} />
         <Route path="/modules" element={<Navigate to="/phone" replace />} />

@@ -17,4 +17,10 @@ describe('per-message private thoughts', () => {
     ], mood: '😌' }))
     expect(parsed.bubbles.map((bubble) => bubble.thought)).toEqual(['第一个念头', '第二个念头'])
   })
+
+  it('keeps an image placeholder at its exact position in a raw turn', () => {
+    const parsed = parseRawPrivateDraft('<thought>先答应他</thought>行啊\n<thought>现在拍一张</thought>[image:mirror_selfie:portrait:normal:卧室镜子前的随手自拍]\n<thought>有点害羞</thought>不许笑我\n<mood>😊</mood>')
+    expect(parsed.bubbles.map((bubble) => bubble.type)).toEqual(['text', 'image', 'text'])
+    expect(parsed.bubbles[1]).toMatchObject({ type: 'image', kind: 'mirror_selfie', aspectRatio: 'portrait', sensitive: false, scene: '卧室镜子前的随手自拍' })
+  })
 })

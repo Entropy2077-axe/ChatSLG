@@ -42,6 +42,14 @@ export const useSettingsStore = create<SettingsState>()(
       worldview: '',
       worldbookMigrationCompleted: false,
       pexelsApiKey: envPexelsKey,
+      atlasApiKey: '',
+      atlasImageEnabled: false,
+      atlasImageModel: 'z-image/turbo',
+      imageVisualStyle: 'realistic',
+      realisticFacePreference: 'auto',
+      imageDailyLimit: 30,
+      showPrivateImages: false,
+      momentsAiImagesEnabled: false,
       themeMode: 'light',
       topInsetAdjustmentPx: 0,
       chatBackground: '',
@@ -70,6 +78,14 @@ export const useSettingsStore = create<SettingsState>()(
         if (typeof next.topInsetAdjustmentPx !== 'number') next.topInsetAdjustmentPx = 0
         if (typeof next.worldbookMigrationCompleted !== 'boolean') next.worldbookMigrationCompleted = false
         if (typeof next.automaticAiDailyCap !== 'number') next.automaticAiDailyCap = 0
+        if (typeof next.atlasApiKey !== 'string') next.atlasApiKey = ''
+        if (typeof next.atlasImageEnabled !== 'boolean') next.atlasImageEnabled = false
+        if (typeof next.atlasImageModel !== 'string') next.atlasImageModel = 'z-image/turbo'
+        if (!['realistic','anime'].includes(String(next.imageVisualStyle))) next.imageVisualStyle = 'realistic'
+        if (!['auto','east_asian','western'].includes(String(next.realisticFacePreference))) next.realisticFacePreference = 'auto'
+        if (typeof next.imageDailyLimit !== 'number') next.imageDailyLimit = 30
+        if (typeof next.showPrivateImages !== 'boolean') next.showPrivateImages = false
+        if (typeof next.momentsAiImagesEnabled !== 'boolean') next.momentsAiImagesEnabled = false
         if (typeof next.animationsEnabled !== 'boolean') next.animationsEnabled = true
         if (typeof next.mindReadingEnabled !== 'boolean') next.mindReadingEnabled = true
         if (!['narration', 'line', 'pill', 'reveal'].includes(String(next.mindReadingStyle))) next.mindReadingStyle = 'narration'

@@ -57,6 +57,7 @@ function privateBubblesText(bubbles: AiBubble[]): string {
       if (b.type === 'text') return b.content
       if (b.type === 'scheduleChange') return `[schedule:${b.summary}]`
       if (b.type === 'link') return `[link:${b.label}]`
+      if (b.type === 'image') return `[image:${b.kind}:${b.scene}]`
       return `[finance:${b.type}:${b.amount}]`
     })
     .join('\n')

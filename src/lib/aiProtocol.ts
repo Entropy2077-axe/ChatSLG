@@ -81,6 +81,11 @@ function tryParseJson(trimmedRaw: string): ParsedAiTurn | null {
     } else if (m.type === 'scheduleChange') {
       const scheduleChange = parseScheduleChangeBubble(m as unknown as Record<string, unknown>)
       if (scheduleChange) bubbles.push({ ...scheduleChange, thought: messageThought })
+    } else if (m.type === 'image') {
+      const value = m as unknown as Record<string, unknown>
+      const kind = ['selfie','mirror_selfie','outfit','object','scene'].includes(String(value.kind)) ? value.kind as 'selfie'|'mirror_selfie'|'outfit'|'object'|'scene' : 'selfie'
+      const scene = typeof value.scene === 'string' ? value.scene.trim().slice(0, 300) : ''
+      if (scene) bubbles.push({ type: 'image', kind, scene, aspectRatio: ['portrait','square','landscape'].includes(String(value.aspectRatio)) ? value.aspectRatio as 'portrait'|'square'|'landscape' : undefined, sensitive: value.sensitive === true, thought: messageThought })
     } else if (['transfer','redPacket','loanRequest','loanDecision','giftPurchase'].includes(String(m.type))) {
       const fm = m as unknown as Record<string, unknown>
       const amount = Math.round(Number(fm.amount))
@@ -142,8 +147,10 @@ export function parseRawPrivateDraft(raw: string, fallbackMood: string = '😌')
       line = line.slice(1, -1).trim()
     }
     if (!line) continue
+    const image = line.match(/^\[image:(selfie|mirror_selfie|outfit|object|scene):(portrait|square|landscape):(normal|private):(.+)\]$/i)
     const finance = parseFinanceMarker(line)
-    if (finance) bubbles.push({ ...finance, thought })
+    if (image) bubbles.push({ type:'image', kind:image[1] as 'selfie'|'mirror_selfie'|'outfit'|'object'|'scene', aspectRatio:image[2] as 'portrait'|'square'|'landscape', sensitive:image[3].toLowerCase()==='private', scene:image[4].trim().slice(0,300), thought })
+    else if (finance) bubbles.push({ ...finance, thought })
     else bubbles.push({ type: 'text', content: line, thought })
   }
   return {

@@ -30,6 +30,7 @@ export function SettingsPage() {
     adminModeEnabled,
     topInsetAdjustmentPx,
     automaticAiDailyCap,
+    atlasApiKey, atlasImageEnabled, atlasImageModel, imageVisualStyle, realisticFacePreference, imageDailyLimit, showPrivateImages, momentsAiImagesEnabled,
     setSettings,
   } = useSettingsStore()
   const [confirmingWipe, setConfirmingWipe] = useState(false)
@@ -102,6 +103,7 @@ export function SettingsPage() {
   const [utilityModelDraft, setUtilityModelDraft] = useState(utilityModel)
   const [promptDraft, setPromptDraft] = useState(globalSystemPrompt)
   const [pexelsKeyDraft, setPexelsKeyDraft] = useState(pexelsApiKey)
+  const [atlasKeyDraft, setAtlasKeyDraft] = useState(atlasApiKey)
   const presetBackgrounds = ['#f4f4f6', '#f7f0e8', '#eef6f1', '#edf4ff', '#f5efff', '#fff3f0', '#f3f6e8', '#eef7f7']
 
   const [models, setModels] = useState<string[]>([])
@@ -185,6 +187,28 @@ export function SettingsPage() {
         </button>
       </section>
 
+
+      <section className="mt-3 bg-white px-4 py-3">
+        <h2 className="mb-3 text-xs font-medium text-gray-400">AI 图片（Atlas Cloud）</h2>
+        <label className="flex items-center justify-between py-2 text-sm"><span>启用聊天图片</span><input type="checkbox" checked={atlasImageEnabled} onChange={(e)=>setSettings({atlasImageEnabled:e.target.checked})}/></label>
+        <label className="mb-1 block text-xs text-gray-500">Atlas API Key</label>
+        <input value={atlasKeyDraft} onChange={(e)=>setAtlasKeyDraft(e.target.value)} onBlur={()=>setSettings({atlasApiKey:atlasKeyDraft.trim()})} type="password" placeholder="Atlas Cloud API Key" className="mb-3 w-full rounded-lg border border-gray-200 px-3 py-2 text-sm"/>
+        <label className="mb-1 block text-xs text-gray-500">文生图模型</label>
+        <select value={atlasImageModel} onChange={(e)=>setSettings({atlasImageModel:e.target.value})} className="mb-3 w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm">
+          <option value="z-image/turbo">Z-Image Turbo · 约 $0.005/张 · 极速低价</option>
+          <option value="qwen/qwen-image-2.0/text-to-image">Qwen Image 2.0 · 约 $0.028/张 · 中文理解</option>
+          <option value="google/imagen4-fast">Imagen 4 Fast · 约 $0.02/张 · 写实细节</option>
+          <option value="bytedance/seedream-v4">Seedream V4 · 约 $0.027/张 · 风格丰富</option>
+        </select>
+        <label className="mb-1 block text-xs text-gray-500">全局画面风格</label>
+        <div className="mb-3 grid grid-cols-2 gap-2">{(['realistic','anime'] as const).map((value)=><button key={value} onClick={()=>setSettings({imageVisualStyle:value})} className={`rounded-lg py-2 text-sm ${imageVisualStyle===value?'bg-gray-900 text-white':'bg-gray-100 text-gray-600'}`}>{value==='realistic'?'写实':'二次元'}</button>)}</div>
+        {imageVisualStyle==='realistic'&&<select value={realisticFacePreference} onChange={(e)=>setSettings({realisticFacePreference:e.target.value as AppSettings['realisticFacePreference']})} className="mb-3 w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm"><option value="auto">人像倾向：按角色自动判断</option><option value="east_asian">人像倾向：东亚</option><option value="western">人像倾向：西方</option></select>}
+        <label className="mb-1 block text-xs text-gray-500">每日最多提交</label>
+        <select value={imageDailyLimit} onChange={(e)=>setSettings({imageDailyLimit:Number(e.target.value)})} className="mb-2 w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm">{[10,30,50,100,0].map((n)=><option key={n} value={n}>{n===0?'不限制':`${n} 次`}</option>)}</select>
+        <label className="flex items-center justify-between py-2 text-sm"><span>直接显示较私密图片</span><input type="checkbox" checked={showPrivateImages} onChange={(e)=>setSettings({showPrivateImages:e.target.checked})}/></label>
+        <p className="text-[11px] text-gray-400">关闭时仅添加模糊蒙版，不会改写绘图提示词。实际费用与可生成范围以 Atlas 为准。</p>
+        <label className="mt-2 flex items-center justify-between py-2 text-sm"><span>朋友圈偶尔使用 AI 人物图</span><input type="checkbox" checked={momentsAiImagesEnabled} onChange={(e)=>setSettings({momentsAiImagesEnabled:e.target.checked})}/></label>
+      </section>
 
       <section className="mt-3 bg-white px-4 py-3">
         <h2 className="mb-2 text-xs font-medium text-gray-400">聊天热闹程度</h2>

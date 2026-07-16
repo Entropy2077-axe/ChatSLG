@@ -4,6 +4,8 @@ import { chatCompletion } from './deepseek'
 import { momentReactionProbability, uniqueRelationPairs } from './contactRelations'
 import { describeCurrentWorldSchedule, isWorldPhoneAvailable } from './schedule'
 import { searchPexelsPhoto } from './photoSearch'
+import { archivePexelsImage } from './mediaAssets'
+import { atlasQuotaAvailable, createMomentAtlasAsset, startAtlasGeneration } from './atlasImage'
 import { recordSocialEvent } from './socialEvents'
 import { displayName } from './contact'
 import { customPersonalityTraitsLine, formatSpeechSamplesForScene, personalityTraitLine } from './prompt'
@@ -314,13 +316,20 @@ export async function refreshMoments(settings: AppSettings): Promise<RefreshMome
     let imageUrl: string | undefined
     let imagePhotographer: string | undefined
     let imagePhotographerUrl: string | undefined
-    if (willHavePhoto && imageKeyword && settings.pexelsApiKey) {
+    let atlasMomentAssetId: string | undefined
+    const useAtlasPortrait = willHavePhoto && settings.momentsAiImagesEnabled && Math.random() < 0.1 && await atlasQuotaAvailable(settings)
+    if (useAtlasPortrait) {
+      const asset = await createMomentAtlasAsset(poster, settings, momentId, `casual social-media selfie matching this post: ${content}`)
+      atlasMomentAssetId = asset.id
+    } else if (willHavePhoto && imageKeyword && settings.pexelsApiKey) {
       try {
         const photo = await searchPexelsPhoto(settings.pexelsApiKey, imageKeyword, 'landscape')
         if (photo) {
           imageUrl = photo.url
           imagePhotographer = photo.photographer
           imagePhotographerUrl = photo.photographerUrl
+          const asset = await archivePexelsImage({ ownerContactId: poster.id, origin: 'moment', originId: momentId, url: photo.url, photographer: photo.photographer, photographerUrl: photo.photographerUrl })
+          void asset
         }
       } catch {
         // the photo is a nice-to-have; the moment text itself already succeeded
@@ -335,7 +344,9 @@ export async function refreshMoments(settings: AppSettings): Promise<RefreshMome
       imageUrl,
       imagePhotographer,
       imagePhotographerUrl,
+      mediaAssetId: atlasMomentAssetId,
     })
+    if (atlasMomentAssetId) startAtlasGeneration(atlasMomentAssetId, settings)
     stateEvidence.push({ id: momentId, actorId: poster.id, actorName: displayName(poster), content, perceivedBy: involved.map((contact) => contact.id) })
     await recordSocialEvent({
       type: 'moment_posted',

@@ -9,6 +9,7 @@ export function previewForMessage(m?: Message, speakerName?: string): string {
   if (!m) return '暂无消息'
   const body = (() => {
     if (m.type === 'sticker') return '[表情]'
+    if (m.type === 'image') return m.image?.status === 'completed' ? '[图片]' : '[图片生成中]'
     if (m.type === 'link') return `[链接] ${m.content}`
     if (m.type === 'gift') return `[礼物] ${m.content}`
     if (m.type === 'scheduleChange') return `[日程] ${m.content}`

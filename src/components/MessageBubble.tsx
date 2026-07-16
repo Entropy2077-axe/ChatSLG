@@ -3,6 +3,7 @@ import type React from 'react'
 import { Avatar } from './Avatar'
 import { useLongPress } from '../hooks/useLongPress'
 import type { Message } from '../types'
+import { useSettingsStore } from '../store/useSettingsStore'
 
 interface MessageBubbleProps {
   message: Message
@@ -43,6 +44,7 @@ export const MessageBubble = forwardRef<HTMLDivElement, MessageBubbleProps>(func
   },
   ref,
 ) {
+  const showPrivateImages = useSettingsStore((state) => state.showPrivateImages)
   const isUser = message.role === 'user'
   const longPress = useLongPress(() => onLongPress?.())
   if (message.type === 'systemState' && message.systemState) {
@@ -127,6 +129,12 @@ export const MessageBubble = forwardRef<HTMLDivElement, MessageBubbleProps>(func
               <p className="text-[12.5px] leading-relaxed text-gray-500">
                 {({ morning: '08:00', day: '12:00', evening: '18:00', night: '22:00' } as const)[message.scheduleChange.slot]} · {message.scheduleChange.location || message.scheduleChange.locationId}
               </p>
+            </div>
+          )}
+          {message.type === 'image' && (
+            <div className="relative w-56 overflow-hidden rounded-xl bg-gray-200" style={{ aspectRatio: message.image?.aspectRatio || '2/3' }}>
+              {message.image?.status === 'completed' && message.image.url ? <img src={message.image.url} alt={message.image.caption || '聊天图片'} className={`h-full w-full object-cover ${message.image.sensitive && !showPrivateImages ? 'scale-105 blur-xl' : ''}`} /> : <div className="flex h-full items-center justify-center px-4 text-center text-xs text-gray-500">{message.image?.status === 'failed' ? `图片发送失败\n${message.image.caption || ''}` : '图片生成中…'}</div>}
+              {message.image?.status === 'completed' && message.image.sensitive && !showPrivateImages && <div className="absolute inset-0 flex items-center justify-center bg-black/25 px-4 text-center text-xs text-white">较私密图片已隐藏<br/>可在设置中开启直接显示</div>}
             </div>
           )}
           {message.type === 'groupPlan' && (

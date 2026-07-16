@@ -19,6 +19,7 @@ import type {
   WorldState, LocationNode, AcousticEdge, CharacterSchedule, Appointment,
   WorldEvent, PerceivedEvent, CharacterDiary, PendingPhoneMessage,
   WorldMapRecord, OutfitConstraint, ScheduleConstraint,
+  MediaAsset,
 } from '../types'
 
 export class ChatSLGDB extends Dexie {
@@ -62,6 +63,7 @@ export class ChatSLGDB extends Dexie {
   worldMaps!: Table<WorldMapRecord, string>
   outfitConstraints!: Table<OutfitConstraint, string>
   scheduleConstraints!: Table<ScheduleConstraint, string>
+  mediaAssets!: Table<MediaAsset, string>
 
   constructor() {
     super('chatslg-db')
@@ -295,6 +297,9 @@ export class ChatSLGDB extends Dexie {
     })
     this.version(30).stores({
       groupPlans: 'id, groupId, status, worldDay, worldSlot, createdAt, [groupId+createdAt]',
+    })
+    this.version(31).stores({
+      mediaAssets: 'id, ownerContactId, source, origin, originId, status, createdAt, deletedAt, [origin+originId]',
     })
   }
 }
