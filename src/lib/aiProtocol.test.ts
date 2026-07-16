@@ -34,4 +34,9 @@ describe('per-message private thoughts', () => {
     expect(parsed.bubbles.map((bubble) => bubble.type)).toEqual(['text', 'image', 'text'])
     expect(parsed.bubbles[1]).toMatchObject({ type: 'image', scene: '窗边自拍' })
   })
+
+  it('parses full-width image marker punctuation without leaking it as text', () => {
+    const parsed = parseRawPrivateDraft('<thought>发给他</thought>［image：selfie：portrait：normal：樱花树下的旧照片］\n<mood>😊</mood>')
+    expect(parsed.bubbles).toEqual([expect.objectContaining({ type: 'image', scene: '樱花树下的旧照片' })])
+  })
 })

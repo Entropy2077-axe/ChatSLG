@@ -1,8 +1,11 @@
-import { afterEach, describe, expect, it, vi } from 'vitest'
-import { atlasRequestBody, buildAtlasPrompt, fetchAtlasBalance } from './atlasImage'
+import 'fake-indexeddb/auto'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { db } from '../db/db'
+import { atlasRequestBody, buildAtlasPrompt, fetchAtlasBalance, refreshQueuedAtlasPrompt } from './atlasImage'
 import type { AppSettings, Contact } from '../types'
 
 afterEach(() => vi.unstubAllGlobals())
+beforeEach(async () => { await db.open(); await db.mediaAssets.clear() })
 
 describe('Atlas billing API', () => {
   it('reads the available account balance with the configured API key', async () => {
@@ -44,5 +47,48 @@ describe('Atlas model request bodies', () => {
     const settings = { imageVisualStyle: 'realistic', realisticFacePreference: 'auto' } as AppSettings
     expect(buildAtlasPrompt(contact, settings, { type: 'image', kind: 'object', scene: 'a cup', aspectRatio: 'square' })).toContain('No person')
     expect(buildAtlasPrompt(contact, settings, { type: 'image', kind: 'scene', scene: 'a park', aspectRatio: 'landscape' })).toContain('Do not force a person')
+  })
+
+  it('uses the latest structured outfit and excludes outfit metadata', () => {
+    const contact = {
+      id: 'c', name: 'C', systemPrompt: '', avatar: '', avatarColor: '', createdAt: 1,
+      memoryFacts: '', memoryStyle: '', memoryUpdatedAt: 0, memoryMessageCursor: 0,
+      relationshipBase: 'friend', relationshipDynamic: '', visualIdentity: 'adult woman with black hair',
+      outfit: { head: 'black hair', top: 'white shirt', bottom: 'jeans', outerwear: 'none', footwear: 'sneakers', accessories: 'none', updatedAt: 987654321, sourceEventIds: ['event-secret'] },
+    } as Contact
+    const settings = { imageVisualStyle: 'realistic', realisticFacePreference: 'auto' } as AppSettings
+    const prompt = buildAtlasPrompt(contact, settings, { type: 'image', kind: 'outfit', scene: 'standing by a window after taking off her coat', aspectRatio: 'portrait' })
+    expect(prompt).toContain('outerwear: none')
+    expect(prompt).not.toContain('987654321')
+    expect(prompt).not.toContain('event-secret')
+  })
+
+  it('does not inject current clothing into a historical photo', () => {
+    const contact = {
+      id: 'c', name: 'C', systemPrompt: '', avatar: '', avatarColor: '', createdAt: 1,
+      memoryFacts: '', memoryStyle: '', memoryUpdatedAt: 0, memoryMessageCursor: 0,
+      relationshipBase: 'friend', relationshipDynamic: '', visualIdentity: 'adult woman with black hair',
+      outfit: { head: 'black hair', top: 'red sweater', bottom: 'jeans', outerwear: 'black coat', footwear: 'boots', accessories: 'none', updatedAt: 2, sourceEventIds: [] },
+    } as Contact
+    const settings = { imageVisualStyle: 'realistic', realisticFacePreference: 'auto' } as AppSettings
+    const prompt = buildAtlasPrompt(contact, settings, { type: 'image', kind: 'selfie', outfitSource: 'scene', scene: 'a previous weekend photo under cherry blossoms, wearing a white shirt', aspectRatio: 'portrait' })
+    expect(prompt).toContain('Clothing must follow the Scene description only')
+    expect(prompt).not.toContain('black coat')
+    expect(prompt).not.toContain('red sweater')
+  })
+
+  it('rebases a queued prompt from the post-adjudication outfit before submission', async () => {
+    await db.mediaAssets.add({ id: 'asset', ownerContactId: 'c', source: 'atlas', origin: 'chat', originId: 'message', status: 'queued', phase: 'queued', traceEvents: [], prompt: 'Current clothing: outerwear: black coat', width: 1024, height: 1536, sensitive: false, createdAt: 1 })
+    const contact = {
+      id: 'c', name: 'C', systemPrompt: '', avatar: '', avatarColor: '', createdAt: 1,
+      memoryFacts: '', memoryStyle: '', memoryUpdatedAt: 0, memoryMessageCursor: 0,
+      relationshipBase: 'friend', relationshipDynamic: '', visualIdentity: 'adult woman with black hair',
+      outfit: { head: 'black hair', top: 'white shirt', bottom: 'jeans', outerwear: 'none', footwear: 'sneakers', accessories: 'none', updatedAt: 2, sourceEventIds: ['current-turn'] },
+    } as Contact
+    const settings = { imageVisualStyle: 'realistic', realisticFacePreference: 'auto' } as AppSettings
+    await refreshQueuedAtlasPrompt('asset', contact, settings, { type: 'image', kind: 'outfit', scene: 'standing without her coat', aspectRatio: 'portrait' })
+    const refreshed = await db.mediaAssets.get('asset')
+    expect(refreshed?.prompt).toContain('outerwear: none')
+    expect(refreshed?.prompt).not.toContain('outerwear: black coat')
   })
 })

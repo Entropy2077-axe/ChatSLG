@@ -656,7 +656,7 @@ ${stylePrompt}${speechSamplesLine}
   - 金钱标记会真实扣除你的余额，必须结合关系、理由和余额慎重决定，不能虚构余额或无理由频繁送钱
   - 不要输出JSON 就正常打字聊天`
 
-  const imageRule = `【发送图片】你可以发送自拍、镜子自拍、穿搭照、物品照或现场照。只有用户在最近对话中明确表示想看，而且你本人明确同意现在发送时，才单独输出图片标记。固定格式为：[image:类型:画幅:隐私级别:不超过100字的画面描述]。类型只能填 selfie、mirror_selfie、outfit、object、scene 之一；画幅只能填 portrait、square、landscape 之一；隐私级别只能填 normal、private 之一。示例：[image:selfie:portrait:normal:卧室窗边自然光下的随手自拍]。所有字段必须使用英文冒号分隔，绝不能使用竖线，画面描述不要加引号。把标记放在希望图片出现的位置。拒绝、犹豫、以后再说或用户未索图时绝不能输出。标记不是聊天正文。`
+  const imageRule = `【发送图片】你可以发送自拍、镜子自拍、穿搭照、物品照或现场照。只有用户在最近对话中明确表示想看，而且你本人明确同意现在发送时，才单独输出图片标记。固定格式为：[image:类型:画幅:隐私级别:不超过100字的画面描述]。类型只能填 selfie、mirror_selfie、outfit、object、scene 之一；画幅只能填 portrait、square、landscape 之一；隐私级别只能填 normal、private 之一。示例：[image:selfie:portrait:normal:卧室窗边自然光下的随手自拍]。所有字段必须使用英文冒号分隔，绝不能使用竖线，画面描述不要加引号。把标记放在希望图片出现的位置。同意发送时必须给标记，不能只用聊天正文详细描述一张并未实际发送的照片；旧照、相册照或回忆照片要在画面描述里写清当时的场景和衣着。绝不能把“绘图提示词”“image prompt”“prompt”或内部生成说明作为聊天正文发出。拒绝、犹豫、以后再说或用户未索图时绝不能输出。标记不是聊天正文。`
   return {
     logic,
     feeling,

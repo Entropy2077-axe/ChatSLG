@@ -83,7 +83,11 @@ export async function fetchAtlasBalance(apiKey: string): Promise<AtlasBalance> {
   return payload as unknown as AtlasBalance
 }
 
-function outfitText(outfit?: OutfitState) { return outfit ? Object.values(outfit).filter(Boolean).join(', ') : 'casual everyday clothing' }
+const ATLAS_OUTFIT_PARTS: Array<keyof Pick<OutfitState, 'head' | 'top' | 'bottom' | 'outerwear' | 'footwear' | 'accessories'>> = ['head', 'top', 'bottom', 'outerwear', 'footwear', 'accessories']
+function outfitText(outfit?: OutfitState) {
+  if (!outfit) return 'casual everyday clothing'
+  return ATLAS_OUTFIT_PARTS.map((part) => `${part}: ${outfit[part] || 'none'}`).join(', ')
+}
 function identity(contact: Contact, settings: AppSettings) {
   if (contact.visualIdentity?.trim()) return contact.visualIdentity.trim()
   const region = settings.realisticFacePreference === 'east_asian' ? 'East Asian facial features' : settings.realisticFacePreference === 'western' ? 'Western facial features' : ''
@@ -98,7 +102,10 @@ export function buildAtlasPrompt(contact: Contact, settings: AppSettings, bubble
   const privateLine = bubble.sensitive ? 'private intimate atmosphere, follow the described scene faithfully' : 'everyday personal snapshot'
   if (bubble.kind === 'object') return `Object-focused casual smartphone photo. Main subject: ${bubble.scene}. No person unless the scene explicitly requires a hand for scale. Style: ${style}. Natural composition, no watermark, no text.`
   if (bubble.kind === 'scene') return `Environment-focused first-person smartphone photo. Scene: ${bubble.scene}. Do not force a person into the frame. Style: ${style}. Natural candid composition, no watermark, no text.`
-  return `One adult character only. Fixed identity: ${visual}. Preserve the same face, age, hair and distinguishing features. Current clothing: ${outfitText(contact.outfit)}. Scene: ${bubble.scene}. Image type: ${bubble.kind}. Style: ${style}. ${privateLine}. Correct anatomy and hands, no duplicated person, no watermark, no text, do not change identity.`
+  const clothing = bubble.outfitSource === 'scene'
+    ? 'This is a previously taken or described photo. Clothing must follow the Scene description only; do not substitute the character\'s current outfit.'
+    : `Current clothing (authoritative): ${outfitText(contact.outfit)}.`
+  return `One adult character only. Fixed identity: ${visual}. Preserve the same face, age, hair and distinguishing features. ${clothing} Scene: ${bubble.scene}. Image type: ${bubble.kind}. Style: ${style}. ${privateLine}. Correct anatomy and hands, no duplicated person, no watermark, no text, do not change identity.`
 }
 
 function sizeFor(bubble: AiBubbleImage) { return bubble.aspectRatio === 'landscape' || bubble.kind === 'scene' ? '1536*1024' : bubble.aspectRatio === 'square' || bubble.kind === 'object' ? '1024*1024' : '1024*1536' }
@@ -195,6 +202,25 @@ export async function createAtlasPlaceholder(conversationId: string, contact: Co
   return { id: messageId, conversationId, role: 'assistant', type: 'image', content: bubble.scene, image: { assetId, status: 'queued', caption: bubble.scene, aspectRatio: `${width}/${height}`, sensitive: !!bubble.sensitive }, createdAt, pending: true }
 }
 
+/**
+ * A chat image placeholder is intentionally created before the turn's state
+ * adjudication finishes so the reply can appear quickly. Rebase its frozen
+ * prompt immediately before submission so an outfit change accepted in the
+ * same turn (for example, removing a coat) is reflected in the generated
+ * image instead of the contact snapshot captured at turn start.
+ */
+export async function refreshQueuedAtlasPrompt(assetId: string, contact: Contact, settings: AppSettings, bubble: AiBubbleImage): Promise<void> {
+  await db.transaction('rw', db.mediaAssets, async () => {
+    const asset = await db.mediaAssets.get(assetId)
+    if (!asset || asset.source !== 'atlas' || asset.status !== 'queued' || asset.predictionId) return
+    const prompt = buildAtlasPrompt(contact, settings, bubble)
+    await db.mediaAssets.update(assetId, {
+      prompt,
+      traceEvents: [...(asset.traceEvents ?? []), { at: Date.now(), phase: 'queued' as const, message: '已按本轮状态变更刷新绘图提示词' }].slice(-80),
+    })
+  })
+}
+
 export function startAtlasGeneration(assetId: string, settings: AppSettings) {
   if (activeGenerationIds.has(assetId)) return
   activeGenerationIds.add(assetId)
@@ -205,7 +231,7 @@ export async function retryAtlasGeneration(assetId: string, settings: AppSetting
   const asset = await db.mediaAssets.get(assetId)
   if (!asset || asset.source !== 'atlas') return
   await updateTrace(assetId, 'queued', asset.predictionId ? '手动重试查询和下载，不会重复提交任务' : '手动重试提交任务', { status: 'queued', error: undefined, displayError: undefined })
-  if (asset.origin === 'chat') await db.messages.update(asset.originId, { image: { assetId, status: 'queued', caption: asset.prompt, aspectRatio: `${asset.width}/${asset.height}`, sensitive: asset.sensitive } })
+  if (asset.origin === 'chat') await updateChatImage(asset, 'queued')
   startAtlasGeneration(assetId, settings)
 }
 
@@ -235,7 +261,7 @@ async function run(assetId: string, settings: AppSettings) {
   if (!asset || asset.deletedAt) return
   try {
     await updateTrace(assetId, asset.predictionId ? 'polling' : 'submitting', asset.predictionId ? '继续查询已有 Atlas 任务' : '正在向 Atlas 提交图片任务', { status: 'generating', error: undefined })
-    if (asset.origin === 'chat') await db.messages.update(asset.originId, { image: { assetId, status: 'generating', caption: asset.prompt, aspectRatio: `${asset.width}/${asset.height}`, sensitive: asset.sensitive } })
+    if (asset.origin === 'chat') await updateChatImage(asset, 'generating')
 
     let predictionId = asset.predictionId
     if (!predictionId) {
@@ -282,13 +308,31 @@ async function run(assetId: string, settings: AppSettings) {
     const source = image.dataUrl || image.remoteUrl
     if (!source) throw new Error('图片验证成功后没有可保存的内容')
     await updateTrace(assetId, 'completed', '图片已通过下载与解码验证', { status: 'completed', remoteUrl: image.remoteUrl, dataUrl: image.dataUrl, mimeType: image.mimeType, byteSize: image.byteSize, completedAt: Date.now(), error: undefined, displayError: undefined })
-    if (asset.origin === 'chat') await db.messages.update(asset.originId, { pending: false, image: { assetId, status: 'completed', sensitive: asset.sensitive, aspectRatio: `${asset.width}/${asset.height}` } })
+    if (asset.origin === 'chat') await updateChatImage(asset, 'completed', true)
     if (asset.origin === 'moment') await db.moments.update(asset.originId, { mediaAssetId: assetId })
     await updateImageRequestForAsset(assetId, 'completed')
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
     await updateTrace(assetId, 'failed', message, { status: 'failed', error: message })
-    if (asset.origin === 'chat') await db.messages.update(asset.originId, { pending: false, image: { assetId, status: 'failed', caption: message, sensitive: asset.sensitive, aspectRatio: `${asset.width}/${asset.height}` } })
+    if (asset.origin === 'chat') await updateChatImage(asset, 'failed', true, message)
     await updateImageRequestForAsset(assetId, 'failed', message)
   }
+}
+
+async function updateChatImage(asset: MediaAsset, status: NonNullable<Message['image']>['status'], settled = false, failure?: string) {
+  const message = await db.messages.get(asset.originId)
+  if (!message) return
+  // Keep the user-facing scene caption. The internal Atlas prompt must never
+  // cross this boundary into chat history or shared conversation context.
+  await db.messages.update(asset.originId, {
+    ...(settled ? { pending: false } : {}),
+    image: {
+      ...message.image,
+      assetId: asset.id,
+      status,
+      caption: failure || message.image?.caption || message.content,
+      aspectRatio: message.image?.aspectRatio || `${asset.width}/${asset.height}`,
+      sensitive: asset.sensitive,
+    },
+  })
 }

@@ -980,6 +980,9 @@ export interface AiBubbleImage {
   type: 'image'
   kind: 'selfie' | 'mirror_selfie' | 'outfit' | 'object' | 'scene'
   scene: string
+  /** Current captures use authoritative outfit state; historical/shared
+   * photos derive clothing exclusively from their scene description. */
+  outfitSource?: 'current' | 'scene'
   aspectRatio?: 'portrait' | 'square' | 'landscape'
   sensitive?: boolean
   thought?: string

@@ -386,6 +386,7 @@ ${evidenceText}
 - “先穿上/换上某件衣物”等当前动作建议后角色肯定同意，视为现在执行：outfit.shouldChange=true，并从请求中提取明确衣物写入对应部位。没有说明款式时也可使用已明确的通用品类，例如outerwear=外套。
 - evidenceIds只能引用上面的事件ID，且该角色必须是actor或在perceivedBy中。至少一个证据。
 - 衣着只在明确穿上、脱下或更换时改变，只写真实变化部位。当前已经执行的穿脱必须填写timing=immediate，日期和slots交给代码决定；未来才穿填写timing=future及未来day/slots，不能提前声称已穿。
+- 照片、图片、自拍、旧照、相册和回忆中的画面只是“图像内容”，绝不是角色此刻现实衣着的证据。“照片里穿着白上衣”“之前在公园拍的这张”“画面中戴着帽子”等描述一律不得触发outfit。只有本轮明确描述角色在现实中正在穿上、脱下或更换，才允许修改当前衣着。
 - 脱掉某部位时不能省略该部位：例如脱掉外套必须输出patch.outerwear="无"，摘帽子输出patch.head="无"。也接受null，但优先使用“无”。
 - 衣着patch部位必须按此语义选择：head=发型或帽子等头部主体；top=上装；bottom=下装；outerwear=外套；footwear=鞋袜；accessories=蝴蝶结、发箍、发卡、耳饰、项链、围巾、领带、手表、眼镜等配饰。蝴蝶结和发箍即使戴在头发上也优先写accessories，不得漏掉。
 - 穿戴要求即使带有“连续七天、每天、今晚”等持续时间，本质仍然是outfit约束，绝不能因为出现日期或时段就改写成schedule。例如“接下来七天戴蝴蝶结”必须是outfit.shouldChange=true、timing=future、patch.accessories="蝴蝶结"、startDay=当前天、endDay=当前天+6、slots省略；schedule.shouldChange=false。

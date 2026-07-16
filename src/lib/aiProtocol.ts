@@ -150,7 +150,7 @@ export function parseRawPrivateDraft(raw: string, fallbackMood: string = '😌')
     // Older prompts displayed alternatives with `|`, which some models copied as
     // real separators. Accept both forms so a valid image action never leaks as
     // visible marker text, while the prompt now teaches the canonical `:` form.
-    const imagePattern = /\[image:(selfie|mirror_selfie|outfit|object|scene)[:|](portrait|square|landscape)[:|](normal|private)[:|]([^\]]+)\]/ig
+    const imagePattern = /(?:\[|［)image\s*[:：|]\s*(selfie|mirror_selfie|outfit|object|scene)\s*[:：|]\s*(portrait|square|landscape)\s*[:：|]\s*(normal|private)\s*[:：|]\s*([^］\]]+)(?:\]|］)/ig
     const imageMatches = [...line.matchAll(imagePattern)]
     const finance = parseFinanceMarker(line)
     if (imageMatches.length) {

@@ -30,11 +30,14 @@ export function MomentsPage() {
   const [message, setMessage] = useState('')
   const [composerOpen, setComposerOpen] = useState(false)
   const [composerText, setComposerText] = useState('')
+  const [composerImage, setComposerImage] = useState('')
+  const [composerImageError, setComposerImageError] = useState('')
   const [posting, setPosting] = useState(false)
   const [commentingId, setCommentingId] = useState<string | null>(null)
   const [commentDraft, setCommentDraft] = useState('')
   const [replyTarget, setReplyTarget] = useState<{ commentId: string; authorLabel: string } | null>(null)
   const coverInput = useRef<HTMLInputElement>(null)
+  const composerImageInput = useRef<HTMLInputElement>(null)
 
   useEffect(() => {
     settings.setSettings({ momentsLastReadAt: Date.now() })
@@ -145,15 +148,32 @@ export function MomentsPage() {
 
   async function handlePost() {
     const content = composerText.trim()
-    if (!content || posting) return
+    if ((!content && !composerImage) || posting) return
     setPosting(true)
     try {
-      await postUserMoment(content, settings)
+      await postUserMoment(content, settings, composerImage || undefined)
       setComposerText('')
+      setComposerImage('')
+      setComposerImageError('')
+      if (composerImageInput.current) composerImageInput.current.value = ''
       setComposerOpen(false)
     } finally {
       setPosting(false)
     }
+  }
+
+  function handleComposerImage(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0]
+    if (!file) return
+    if (!file.type.startsWith('image/')) { setComposerImageError('请选择图片文件'); return }
+    setComposerImageError('')
+    const reader = new FileReader()
+    reader.onload = async () => {
+      try { setComposerImage(await resizeImageDataUrl(String(reader.result), 1600)) }
+      catch { setComposerImageError('图片读取失败，请换一张重试') }
+    }
+    reader.onerror = () => setComposerImageError('图片读取失败，请换一张重试')
+    reader.readAsDataURL(file)
   }
 
   async function toggleUserLike(momentId: string, posterContactId?: string) {
@@ -228,11 +248,18 @@ export function MomentsPage() {
             rows={3}
             className="w-full resize-none rounded-lg border border-gray-200 px-3 py-2 text-sm"
           />
-          <div className="mt-2 flex justify-end gap-2">
+          {composerImage && <div className="relative mt-2 h-28 w-28 overflow-hidden rounded-lg bg-gray-100"><img src={composerImage} alt="待发布图片" className="h-full w-full object-cover" /><button type="button" onClick={() => { setComposerImage(''); if (composerImageInput.current) composerImageInput.current.value = '' }} aria-label="移除图片" className="absolute right-1 top-1 flex h-6 w-6 items-center justify-center rounded-full bg-black/60 text-xs text-white">×</button></div>}
+          {composerImageError && <p className="mt-2 text-xs text-red-500">{composerImageError}</p>}
+          <div className="mt-2 flex items-center justify-between gap-2">
+            <div><input ref={composerImageInput} type="file" accept="image/*" onChange={handleComposerImage} className="hidden" /><button type="button" onClick={() => composerImageInput.current?.click()} className="rounded-lg bg-gray-100 px-3 py-1.5 text-sm text-gray-600">{composerImage ? '更换照片' : '选择照片'}</button></div>
+            <div className="flex gap-2">
             <button
               onClick={() => {
                 setComposerOpen(false)
                 setComposerText('')
+                setComposerImage('')
+                setComposerImageError('')
+                if (composerImageInput.current) composerImageInput.current.value = ''
               }}
               className="rounded-lg px-3 py-1.5 text-sm text-gray-400"
             >
@@ -240,11 +267,12 @@ export function MomentsPage() {
             </button>
             <button
               onClick={handlePost}
-              disabled={!composerText.trim() || posting}
+              disabled={(!composerText.trim() && !composerImage) || posting}
               className="rounded-lg bg-gray-900 px-4 py-1.5 text-sm text-white disabled:opacity-40"
             >
               {posting ? '发布中…' : '发布'}
             </button>
+            </div>
           </div>
         </div>
       )}

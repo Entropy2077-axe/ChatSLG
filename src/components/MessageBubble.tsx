@@ -1,4 +1,4 @@
-import { forwardRef } from 'react'
+import { forwardRef, useEffect, useState } from 'react'
 import type React from 'react'
 import { Avatar } from './Avatar'
 import { useLongPress } from '../hooks/useLongPress'
@@ -7,6 +7,7 @@ import { useSettingsStore } from '../store/useSettingsStore'
 import { reportImageDisplayError } from '../lib/atlasImage'
 import { useLiveQuery } from 'dexie-react-hooks'
 import { db } from '../db/db'
+import { downloadImageSource } from '../lib/imageDownload'
 
 interface MessageBubbleProps {
   message: Message
@@ -50,6 +51,7 @@ export const MessageBubble = forwardRef<HTMLDivElement, MessageBubbleProps>(func
   const showPrivateImages = useSettingsStore((state) => state.showPrivateImages)
   const imageAsset = useLiveQuery(() => message.image?.assetId ? db.mediaAssets.get(message.image.assetId) : undefined, [message.image?.assetId])
   const imageSource = imageAsset?.dataUrl || imageAsset?.remoteUrl || message.image?.url
+  const [imagePreviewOpen, setImagePreviewOpen] = useState(false)
   const isUser = message.role === 'user'
   const longPress = useLongPress(() => onLongPress?.())
   if (message.type === 'systemState' && message.systemState) {
@@ -138,7 +140,7 @@ export const MessageBubble = forwardRef<HTMLDivElement, MessageBubbleProps>(func
           )}
           {message.type === 'image' && (
             <div className="relative w-56 overflow-hidden rounded-xl bg-gray-200" style={{ aspectRatio: message.image?.aspectRatio || '2/3' }}>
-              {message.image?.status === 'completed' && imageSource ? <img src={imageSource} alt={message.image.caption || '聊天图片'} onError={() => { if (message.image?.assetId) void reportImageDisplayError(message.image.assetId, '聊天图片在当前设备中加载失败') }} className={`h-full w-full object-cover ${message.image.sensitive && !showPrivateImages ? 'scale-105 blur-xl' : ''}`} /> : <div className="flex h-full items-center justify-center whitespace-pre-line px-4 text-center text-xs text-gray-500">{message.image?.status === 'failed' ? `图片发送失败\n${message.image.caption || ''}` : '图片生成中…'}</div>}
+              {message.image?.status === 'completed' && imageSource ? <button type="button" disabled={message.image.sensitive && !showPrivateImages} onClick={(event) => { event.stopPropagation(); setImagePreviewOpen(true) }} className="h-full w-full cursor-zoom-in disabled:cursor-default"><img src={imageSource} alt={message.image.caption || '聊天图片'} onError={() => { if (message.image?.assetId) void reportImageDisplayError(message.image.assetId, '聊天图片在当前设备中加载失败') }} className={`h-full w-full object-cover ${message.image.sensitive && !showPrivateImages ? 'scale-105 blur-xl' : ''}`} /></button> : <div className="flex h-full items-center justify-center whitespace-pre-line px-4 text-center text-xs text-gray-500">{message.image?.status === 'failed' ? `图片发送失败\n${message.image.caption || ''}` : '图片生成中…'}</div>}
               {message.image?.status === 'completed' && message.image.sensitive && !showPrivateImages && <div className="absolute inset-0 flex items-center justify-center bg-black/25 px-4 text-center text-xs text-white">较私密图片已隐藏<br/>可在设置中开启直接显示</div>}
             </div>
           )}
@@ -166,9 +168,32 @@ export const MessageBubble = forwardRef<HTMLDivElement, MessageBubbleProps>(func
           </div>
         </div>
       </div>
+      {imagePreviewOpen && imageSource && <ImagePreview source={imageSource} alt={message.image?.caption || '聊天图片'} onClose={() => setImagePreviewOpen(false)} />}
     </div>
   )
 })
+
+function ImagePreview({ source, alt, onClose }: { source: string; alt: string; onClose: () => void }) {
+  const [saveState, setSaveState] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle')
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => { if (event.key === 'Escape') onClose() }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [onClose])
+  const save = async () => {
+    setSaveState('saving')
+    try { await downloadImageSource(source); setSaveState('saved') }
+    catch { setSaveState('error') }
+  }
+  return <div role="dialog" aria-modal="true" aria-label="图片预览" onClick={(event) => { event.stopPropagation(); onClose() }} onPointerDown={(event: React.PointerEvent) => event.stopPropagation()} className="fixed inset-0 z-[100] flex flex-col bg-black/95">
+    <div className="flex shrink-0 items-center justify-between px-4 pb-3 pt-[max(12px,env(safe-area-inset-top))] text-white">
+      <button type="button" onClick={onClose} className="rounded-full bg-white/10 px-3 py-2 text-sm">关闭</button>
+      <span className={`text-xs ${saveState === 'error' ? 'text-red-300' : 'text-white/70'}`}>{saveState === 'saved' ? '已保存' : saveState === 'error' ? '保存失败' : ''}</span>
+      <button type="button" disabled={saveState === 'saving'} onClick={(event) => { event.stopPropagation(); void save() }} className="rounded-full bg-white px-4 py-2 text-sm font-medium text-gray-900 disabled:opacity-60">{saveState === 'saving' ? '保存中…' : '保存图片'}</button>
+    </div>
+    <div className="min-h-0 flex flex-1 items-center justify-center p-3"><img src={source} alt={alt} onClick={(event) => event.stopPropagation()} className="max-h-full max-w-full object-contain" /></div>
+  </div>
+}
 
 function TextWithMentions({ text, names }: { text: string; names: string[] }) {
   if (names.length === 0) return <>{text}</>

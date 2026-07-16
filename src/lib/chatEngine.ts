@@ -26,7 +26,7 @@ import type { AiBubble, AppSettings, Contact, Message, MessageType, Sticker } fr
 import { messagesForAiTurn, recentConversationMessages } from './conversationStats'
 import { waitForMessageReveal } from './messagePacing'
 import { modelWorldTimeText } from './worldCalendar'
-import { atlasQuotaAvailable, createAtlasPlaceholder, startAtlasGeneration } from './atlasImage'
+import { atlasQuotaAvailable, createAtlasPlaceholder, refreshQueuedAtlasPrompt, startAtlasGeneration } from './atlasImage'
 import { applyImageActionReview, attachImageRequestAsset, imageRequestPrompt, isExplicitImageRequest, prepareImageRequest, reviewImageRequest } from './imageRequests'
 import type { ImageRequestTask } from '../types'
 
@@ -392,7 +392,9 @@ async function runAiTurn(
     const habitText = `【相处习惯】${contact.memoryStyle || '（还没有形成习惯）'}`
     const plansText = activeWorldPlansText(contact, logicBundle.clock.day, logicBundle.clock.slot)
     const situationText = `【当前情境】现在: ${modelWorldTimeText(logicBundle.clock)}。对方: ${buildUserProfileText(settings)}。${activeMood ? `你的心情: ${activeMood}。` : ''}【世界日程】${currentAuthoritativeSchedule ? `\n当前: ${currentAuthoritativeSchedule.activity}，地点=${currentAuthoritativeSchedule.locationId}` : '\n当前: 暂无安排'}${scheduleText ? `\n完整有效日程:\n${scheduleText}` : '\n完整有效日程: 暂无'}${plansText ? `\n约定: ${plansText}` : ''}${recentEventsText ? `\n最近: ${recentEventsText}` : ''}`
-    const imageAvailable = await atlasQuotaAvailable(settings)
+    // Image availability is irrelevant on ordinary turns. Avoid scanning all
+    // historical Atlas assets unless this turn has an actual image request.
+    const imageAvailable = imageRequestTask ? await atlasQuotaAvailable(settings) : false
     const contextSections = buildRawChatPrompt({
       name: contact.name,
       persona: `${contact.systemPrompt}${customPersonalityTraitsLine(contact.customPersonalityTraits)}${isModuleEnabled('career') && contact.occupation ? `\n当前职业：${contact.occupation}，现实月薪：${contact.monthlySalary ?? 0}。工作会真实影响你的作息和日常话题。` : ''}${financeContext}`,
@@ -413,7 +415,9 @@ async function runAiTurn(
         lifeEventText ? `【近期生活】${lifeEventText}` : '',
         proactiveContext,
         imageRequestPrompt(imageRequestTask),
-        imageAvailable ? '【图片能力】本轮可发送图片，但仍必须由用户明确索图且你明确同意。' : '【图片能力】本轮图片不可用，不要承诺立即发图，也不要输出图片标记。',
+        imageRequestTask
+          ? (imageAvailable ? '【图片能力】本轮可发送图片，但仍必须由用户明确索图且你明确同意。' : '【图片能力】本轮图片不可用，不要承诺立即发图，也不要输出图片标记。')
+          : '',
       ].filter(Boolean).join('\n\n'),
       activeIntentText: injectedIntentText,
       stickerNames: stickers.map((s) => s.name),
@@ -657,7 +661,7 @@ async function revealBubbles(
   }
 
   const preparedMessages: Message[] = []
-  const atlasAssetIds: string[] = []
+  const atlasAssets: Array<{ assetId: string; bubble: import('../types').AiBubbleImage }> = []
   for (const [i, bubble] of bubbles.entries()) {
 
       if (bubble.type === 'image') {
@@ -665,7 +669,7 @@ async function revealBubbles(
         if (!await atlasQuotaAvailable(settings)) { await db.imageRequests.update(imageRequestTaskId, { status: 'failed', decisionReason: 'Atlas 未启用、API Key 缺失或今日提交次数已达上限', resolvedAt: Date.now(), updatedAt: Date.now() }); continue }
         const imageMessage = await createAtlasPlaceholder(conversationId, contact, settings, bubble, assistantEvidenceIds[i] ?? uuid(), Date.now() + i)
         preparedMessages.push(imageMessage)
-        if (imageMessage.image?.assetId) { atlasAssetIds.push(imageMessage.image.assetId); await attachImageRequestAsset(imageRequestTaskId, imageMessage.image.assetId) }
+        if (imageMessage.image?.assetId) { atlasAssets.push({ assetId: imageMessage.image.assetId, bubble }); await attachImageRequestAsset(imageRequestTaskId, imageMessage.image.assetId) }
         continue
       }
 
@@ -779,7 +783,7 @@ async function revealBubbles(
     // Message delivery failure still rolls back unrevealed previews. State
     // adjudication is independent and never cancels an agreed image action.
     await db.messages.bulkDelete(revealedMessages.map((message) => message.id))
-    await db.mediaAssets.bulkDelete(atlasAssetIds)
+    await db.mediaAssets.bulkDelete(atlasAssets.map(({ assetId }) => assetId))
     await db.conversations.update(conversationId, { updatedAt: Date.now() })
     throw revealResult.reason
   }
@@ -789,7 +793,13 @@ async function revealBubbles(
   console.info(`[回合耗时｜私聊] 首次显示=${Math.round(visibleAt - turnStartedAt)}ms；状态裁决与提交=${Math.round(unlockedAt - stateStartedAt)}ms；解锁=${Math.round(unlockedAt - turnStartedAt)}ms`)
   useChatEngineStore.getState().patch(conversationId, { aiTyping: false, typingLabel: undefined })
   if (streamByConversation.get(conversationId) === streamId) streamByConversation.delete(conversationId)
-  for (const assetId of atlasAssetIds) startAtlasGeneration(assetId, settings)
+  // State adjudication and bubble reveal run in parallel. The placeholders
+  // above therefore contain the contact snapshot from before adjudication.
+  // Re-read authoritative state only after both have settled, then replace
+  // each still-queued prompt before Atlas gets a chance to submit it.
+  const latestContact = atlasAssets.length > 0 ? await db.contacts.get(contact.id) : undefined
+  if (latestContact) await Promise.all(atlasAssets.map(({ assetId, bubble }) => refreshQueuedAtlasPrompt(assetId, latestContact, settings, bubble)))
+  for (const { assetId } of atlasAssets) startAtlasGeneration(assetId, settings)
 
   if (injectedIntentIds.length > 0) await markIntentsUsed(contact.id, injectedIntentIds)
   if (turnMood) {

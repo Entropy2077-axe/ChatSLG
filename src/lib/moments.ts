@@ -468,10 +468,23 @@ function parseCommentsResponse(raw: string, expectedCount: number): string[] | n
  * but probability comes from relationship dimensions since there's no
  * contactRelations link for the user.
  */
-export async function postUserMoment(content: string, settings: AppSettings): Promise<void> {
+export async function postUserMoment(content: string, settings: AppSettings, imageDataUrl?: string): Promise<void> {
   const now = Date.now()
   const momentId = uuid()
-  await db.moments.add({ id: momentId, contactId: 'user', content, createdAt: now })
+  const mediaAssetId = imageDataUrl ? uuid() : undefined
+  await db.transaction('rw', [db.moments, db.mediaAssets], async () => {
+    if (mediaAssetId && imageDataUrl) {
+      const mimeType = imageDataUrl.slice(5, imageDataUrl.indexOf(';')) || 'image/jpeg'
+      const payload = imageDataUrl.slice(imageDataUrl.indexOf(',') + 1)
+      await db.mediaAssets.add({
+        id: mediaAssetId, ownerContactId: 'user', source: 'upload', origin: 'moment', originId: momentId,
+        status: 'completed', phase: 'completed', dataUrl: imageDataUrl, mimeType,
+        byteSize: Math.floor(payload.length * 0.75), createdAt: now, completedAt: now,
+        traceEvents: [{ at: now, phase: 'completed', message: '用户朋友圈图片已保存' }],
+      })
+    }
+    await db.moments.add({ id: momentId, contactId: 'user', content, mediaAssetId, createdAt: now })
+  })
 
   if (!settings.apiKey) return
   const contacts = await db.contacts.toArray()
@@ -502,7 +515,7 @@ export async function postUserMoment(content: string, settings: AppSettings): Pr
           {
             role: 'system',
             content: buildUserMomentCommentPrompt(
-              content,
+              content || '（用户发布了一张照片）',
               commenterPlans.map((p) => p.contact),
               isModuleEnabled('worldview') ? await retrieveWorldbookContext(content) : '',
               stickerNames,
@@ -525,7 +538,8 @@ export async function postUserMoment(content: string, settings: AppSettings): Pr
   }
 
   let commentIndex = 0
-  const stateEvidence: StateEvidence[] = [{ id: momentId, actorId: 'user', actorName: '用户', content, perceivedBy: plans.map((plan) => plan.contact.id) }]
+  const visibleContent = content || '用户发布了一张图片朋友圈'
+  const stateEvidence: StateEvidence[] = [{ id: momentId, actorId: 'user', actorName: '用户', content: visibleContent, perceivedBy: plans.map((plan) => plan.contact.id) }]
   for (const plan of plans) {
     await db.momentLikes.add({ id: uuid(), momentId, likerId: plan.contact.id, createdAt: now })
     await recordSocialEvent({
@@ -534,7 +548,7 @@ export async function postUserMoment(content: string, settings: AppSettings): Pr
       targetId: 'user',
       relatedContactIds: [plan.contact.id],
       momentId,
-      summary: `${plan.contact.name}赞了用户的朋友圈: ${content}`,
+      summary: `${plan.contact.name}赞了用户的朋友圈: ${visibleContent}`,
       importance: 1,
       createdAt: now,
     })
