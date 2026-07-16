@@ -20,6 +20,7 @@ import type {
   WorldEvent, PerceivedEvent, CharacterDiary, PendingPhoneMessage,
   WorldMapRecord, OutfitConstraint, ScheduleConstraint,
   MediaAsset,
+  ImageRequestTask,
 } from '../types'
 
 export class ChatSLGDB extends Dexie {
@@ -64,6 +65,7 @@ export class ChatSLGDB extends Dexie {
   outfitConstraints!: Table<OutfitConstraint, string>
   scheduleConstraints!: Table<ScheduleConstraint, string>
   mediaAssets!: Table<MediaAsset, string>
+  imageRequests!: Table<ImageRequestTask, string>
 
   constructor() {
     super('chatslg-db')
@@ -300,6 +302,9 @@ export class ChatSLGDB extends Dexie {
     })
     this.version(31).stores({
       mediaAssets: 'id, ownerContactId, source, origin, originId, status, createdAt, deletedAt, [origin+originId]',
+    })
+    this.version(32).stores({
+      imageRequests: 'id, conversationId, contactId, requestMessageId, mediaAssetId, status, createdAt, updatedAt, [conversationId+status]',
     })
   }
 }

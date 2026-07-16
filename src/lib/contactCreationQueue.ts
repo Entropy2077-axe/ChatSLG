@@ -11,6 +11,7 @@ import { pickAvatarCategory } from './avatarCategory'
 import { randomAnimeAvatar, searchPexelsPhoto } from './photoSearch'
 import { archivePexelsImage } from './mediaAssets'
 import { buildPersonaGenerationPrompt, parsePersonaGeneration } from './prompt'
+import { stableVisualSeed } from './contactVisual'
 import { ensureWorldInitialized, formatLocationTree } from './world'
 import { retrieveWorldbookContext } from './worldbook'
 import { randomAvatarColor } from './colors'
@@ -114,6 +115,8 @@ async function commitGeneratedContact(job: ContactCreationJob, draft: NonNullabl
       personaProfile: parsed.personaProfile,
       speechSamples: parsed.speechSamples,
       outfit: { ...parsed.outfit, updatedAt: now, sourceEventIds: [] },
+      visualIdentity: parsed.visualIdentity,
+      visualSeed: stableVisualSeed(id),
       createdAt: now,
       memoryFacts: '',
       memoryStyle: '',

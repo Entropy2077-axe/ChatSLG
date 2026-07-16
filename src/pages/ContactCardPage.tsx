@@ -238,7 +238,9 @@ export function ContactCardPage() {
   const currentOutfit = worldState ? resolveCurrentOutfit(contact, outfitConstraints, worldState.day, worldState.slot) : (contact.outfit ?? defaultOutfit(contact.createdAt))
   const currentTemporarySchedule = worldState ? resolveScheduleConstraint(scheduleConstraints, worldState.day, worldState.slot) : undefined
   const upcomingOutfit = outfitConstraints.filter((item) => !worldState || item.startDay > worldState.day).sort((a, b) => a.startDay - b.startDay)[0]
-  const upcomingSchedule = scheduleConstraints.filter((item) => !worldState || item.startDay > worldState.day).sort((a, b) => a.startDay - b.startDay)[0]
+  const slotOrder = { morning: 0, day: 1, evening: 2, night: 3 } as const
+  const todayLaterSchedules = worldState ? scheduleConstraints.filter((item) => item.startDay <= worldState.day && item.endDay >= worldState.day && (item.slots ?? []).some((slot) => slotOrder[slot] > slotOrder[worldState.slot])).sort((a, b) => Math.min(...(a.slots ?? []).map((slot) => slotOrder[slot])) - Math.min(...(b.slots ?? []).map((slot) => slotOrder[slot]))) : []
+  const futureSchedules = scheduleConstraints.filter((item) => !worldState || item.startDay > worldState.day).sort((a, b) => a.startDay - b.startDay)
 
   // Admin-mode-only: shows exactly what would be sent as the system prompt
   // right now, for debugging persona/relationship issues. Mirrors
@@ -443,7 +445,8 @@ export function ContactCardPage() {
       <section className="mt-3 bg-white px-4 py-4">
         <div className="mb-2 flex items-center justify-between"><h3 className="text-xs font-medium text-gray-400">世界日程</h3><button onClick={() => void adaptSchedule()} disabled={adaptingSchedule} className="text-xs text-violet-600 disabled:opacity-50">{adaptingSchedule ? '适配中…' : '重新适配基础日程'}</button></div>
         {currentTemporarySchedule && <p className="mb-2 rounded-lg bg-violet-50 px-2.5 py-2 text-xs text-violet-700">当前临时约束 · 第{currentTemporarySchedule.startDay}–{currentTemporarySchedule.endDay}天 · {locationById.get(currentTemporarySchedule.locationId)?.name || currentTemporarySchedule.locationId} · {currentTemporarySchedule.activity}</p>}
-        {upcomingSchedule && <p className="mb-2 text-xs text-violet-600">即将生效：第{upcomingSchedule.startDay}–{upcomingSchedule.endDay}天 · {upcomingSchedule.activity}</p>}
+        {todayLaterSchedules.length > 0 && <div className="mb-2 rounded-lg bg-blue-50 px-2.5 py-2 text-xs text-blue-700"><p className="font-medium">今日稍后</p>{todayLaterSchedules.map((item) => <p key={item.id} className="mt-1">{item.slots?.map(slotLabel).join('/') || '全天'} · {locationById.get(item.locationId)?.name || item.locationId} · {item.activity}</p>)}</div>}
+        {futureSchedules.length > 0 && <div className="mb-2 text-xs text-violet-600"><p className="font-medium">未来日程</p>{futureSchedules.map((item) => <p key={item.id} className="mt-1">第{item.startDay}–{item.endDay}天 · {item.slots?.map(slotLabel).join('/') || '全天'} · {item.activity}</p>)}</div>}
         {worldSchedules.length === 0 ? (
           <p className="text-sm text-gray-400">暂无日程。角色不会凭空移动。</p>
         ) : (
@@ -471,6 +474,12 @@ export function ContactCardPage() {
                 </div>
               )
             })}
+          </div>
+        )}
+        {appointments.filter((item) => item.status === 'proposed').length > 0 && (
+          <div className="mt-3 border-t border-gray-100 pt-3">
+            <h4 className="mb-1 text-xs font-medium text-amber-600">待其他角色确认</h4>
+            {appointments.filter((item) => item.status === 'proposed').map((item) => <p key={item.id} className="text-sm text-gray-600">{formatWorldDate(item.day)} · {slotLabel(item.slot)} · {locationById.get(item.locationId)?.name || item.locationId} · {item.description}</p>)}
           </div>
         )}
         {appointments.filter((item) => item.status === 'planned').length > 0 && (

@@ -4,6 +4,9 @@ import { Avatar } from './Avatar'
 import { useLongPress } from '../hooks/useLongPress'
 import type { Message } from '../types'
 import { useSettingsStore } from '../store/useSettingsStore'
+import { reportImageDisplayError } from '../lib/atlasImage'
+import { useLiveQuery } from 'dexie-react-hooks'
+import { db } from '../db/db'
 
 interface MessageBubbleProps {
   message: Message
@@ -45,6 +48,8 @@ export const MessageBubble = forwardRef<HTMLDivElement, MessageBubbleProps>(func
   ref,
 ) {
   const showPrivateImages = useSettingsStore((state) => state.showPrivateImages)
+  const imageAsset = useLiveQuery(() => message.image?.assetId ? db.mediaAssets.get(message.image.assetId) : undefined, [message.image?.assetId])
+  const imageSource = imageAsset?.dataUrl || imageAsset?.remoteUrl || message.image?.url
   const isUser = message.role === 'user'
   const longPress = useLongPress(() => onLongPress?.())
   if (message.type === 'systemState' && message.systemState) {
@@ -133,7 +138,7 @@ export const MessageBubble = forwardRef<HTMLDivElement, MessageBubbleProps>(func
           )}
           {message.type === 'image' && (
             <div className="relative w-56 overflow-hidden rounded-xl bg-gray-200" style={{ aspectRatio: message.image?.aspectRatio || '2/3' }}>
-              {message.image?.status === 'completed' && message.image.url ? <img src={message.image.url} alt={message.image.caption || '聊天图片'} className={`h-full w-full object-cover ${message.image.sensitive && !showPrivateImages ? 'scale-105 blur-xl' : ''}`} /> : <div className="flex h-full items-center justify-center px-4 text-center text-xs text-gray-500">{message.image?.status === 'failed' ? `图片发送失败\n${message.image.caption || ''}` : '图片生成中…'}</div>}
+              {message.image?.status === 'completed' && imageSource ? <img src={imageSource} alt={message.image.caption || '聊天图片'} onError={() => { if (message.image?.assetId) void reportImageDisplayError(message.image.assetId, '聊天图片在当前设备中加载失败') }} className={`h-full w-full object-cover ${message.image.sensitive && !showPrivateImages ? 'scale-105 blur-xl' : ''}`} /> : <div className="flex h-full items-center justify-center whitespace-pre-line px-4 text-center text-xs text-gray-500">{message.image?.status === 'failed' ? `图片发送失败\n${message.image.caption || ''}` : '图片生成中…'}</div>}
               {message.image?.status === 'completed' && message.image.sensitive && !showPrivateImages && <div className="absolute inset-0 flex items-center justify-center bg-black/25 px-4 text-center text-xs text-white">较私密图片已隐藏<br/>可在设置中开启直接显示</div>}
             </div>
           )}

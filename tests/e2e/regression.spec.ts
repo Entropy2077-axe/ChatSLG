@@ -47,6 +47,7 @@ async function seedBackupFixture(page: Page) {
       userNickname: 'Backup User',
       apiKey: 'sk-regression-secret',
       pexelsApiKey: 'pexels-regression-secret',
+      atlasApiKey: 'atlas-regression-secret',
     })
   })
 }
@@ -151,13 +152,16 @@ test('settings page exports a complete ChatSLG backup json', async ({ page }) =>
 
   const backup = JSON.parse(await import('node:fs/promises').then((fs) => fs.readFile(path!, 'utf8')))
   expect(backup.format).toBe('chatslg-backup')
-  expect(backup.schemaVersion).toBe(6)
+  expect(backup.schemaVersion).toBe(7)
   expect(backup.settings.userNickname).toBe('Backup User')
+  expect(JSON.stringify(backup.settings)).not.toContain('sk-regression-secret')
+  expect(JSON.stringify(backup.settings)).not.toContain('pexels-regression-secret')
+  expect(JSON.stringify(backup.settings)).not.toContain('atlas-regression-secret')
   expect(backup.tables.contacts).toHaveLength(1)
   expect(backup.tables.conversations).toHaveLength(1)
   expect(backup.tables.messages).toHaveLength(1)
   expect(Object.keys(backup.tables)).toEqual(
-    expect.arrayContaining(['moments', 'savedWorldviews', 'worldbookEntries', 'worldMaps', 'mediaAssets']),
+    expect.arrayContaining(['moments', 'savedWorldviews', 'worldbookEntries', 'worldMaps', 'mediaAssets', 'imageRequests']),
   )
 })
 
@@ -196,7 +200,9 @@ test('settings page restores contacts and settings from a backup file', async ({
   expect(restored.contacts[0].name).toBe('Backup Alice')
   expect(restored.messages[0].content).toBe('backup hello')
   expect(restored.userNickname).toBe('Backup User')
-  expect(restored.apiKey).toBe('sk-regression-secret')
+  // External backups deliberately exclude API keys; restoring must preserve the
+  // keys already configured on this device instead of importing secrets.
+  expect(restored.apiKey).toBe('mutated-secret')
 })
 
 test('locations page replaces discover and does not expose removed todo entry', async ({ page }) => {
@@ -322,6 +328,54 @@ test('chat page can generate a selected-message screenshot preview', async ({ pa
   await expect(page.getByAltText('聊天记录截图预览')).toBeVisible()
   await expect(page.getByRole('button', { name: '保存图片' })).toBeVisible()
   await expect(page.getByRole('button', { name: '分享' })).toBeVisible()
+})
+
+test('plain-text image acceptance submits Atlas and completes the pending image task', async ({ page }) => {
+  let atlasSubmits = 0
+  await page.route('**/v1/chat/completions', async (route) => {
+    const body = route.request().postDataJSON() as { messages?: Array<{ content?: string }>; response_format?: unknown }
+    const prompt = (body.messages ?? []).map((message) => message.content ?? '').join('\n')
+    let content = '好，我现在拍给你。'
+    if (prompt.includes('"decision":"accept|reject|defer"')) {
+      const taskId = prompt.match(/"taskId":"([^"]+)"/)?.[1] ?? ''
+      content = JSON.stringify({ taskId, decision: 'accept', kind: 'selfie', aspectRatio: 'portrait', sensitive: false, scene: '自然光下的随手自拍', reason: '角色明确同意现在发送' })
+    } else if (prompt.includes('{"valid":true,"reason":""}')) {
+      content = JSON.stringify({ valid: true, reason: '' })
+    } else if (body.response_format) {
+      content = JSON.stringify({ replyReview: { valid: true, reason: '' }, decisions: [], pendingIntents: [] })
+    }
+    await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ choices: [{ finish_reason: 'stop', message: { content } }] }) })
+  })
+  await page.route('https://api.atlascloud.ai/api/v1/model/generateImage', async (route) => {
+    atlasSubmits += 1
+    await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ data: { id: 'prediction-e2e' } }) })
+  })
+  await page.route('https://api.atlascloud.ai/api/v1/model/prediction/prediction-e2e', async (route) => {
+    await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ data: { status: 'completed', outputs: ['data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIxIiBoZWlnaHQ9IjEiPjwv c3ZnPg=='.replace(' ', '')] } }) })
+  })
+
+  await page.goto('/#/')
+  await page.evaluate(async () => {
+    const { db } = await import('/src/db/db.ts')
+    const { ensureWorldInitialized } = await import('/src/lib/world.ts')
+    const { sendMessage } = await import('/src/lib/chatEngine.ts')
+    const { useSettingsStore } = await import('/src/store/useSettingsStore.ts')
+    for (const table of db.tables) await table.clear()
+    await ensureWorldInitialized()
+    const contact = { id: 'image-contact', name: 'Image Test', avatar: '🙂', avatarColor: '#eee', systemPrompt: 'An adult friend who communicates naturally.', visualIdentity: 'adult East Asian woman with an oval face, dark eyes and shoulder-length black hair', visualSeed: 12345, createdAt: 1, memoryFacts: '', memoryStyle: '', memoryUpdatedAt: 0, memoryMessageCursor: 0, relationshipBase: '朋友', relationshipDynamic: '' }
+    await db.contacts.add(contact)
+    await db.conversations.add({ id: 'image-conversation', contactId: contact.id, pinned: false, createdAt: 1, updatedAt: 1 })
+    useSettingsStore.getState().setSettings({ apiKey: 'chat-e2e-key', baseUrl: 'https://chat-e2e.test', model: 'test-model', utilityModel: 'test-utility', atlasApiKey: 'atlas-e2e-key', atlasImageEnabled: true, atlasImageModel: 'z-image/turbo', imageDailyLimit: 30 })
+    await sendMessage('image-conversation', contact, useSettingsStore.getState(), [], '给我拍一张照片')
+  })
+
+  await expect.poll(async () => page.evaluate(async () => {
+    const { db } = await import('/src/db/db.ts')
+    const task = await db.imageRequests.where('conversationId').equals('image-conversation').first()
+    const asset = task?.mediaAssetId ? await db.mediaAssets.get(task.mediaAssetId) : undefined
+    return { taskStatus: task?.status, predictionId: asset?.predictionId, assetStatus: asset?.status, submitAttempts: asset?.submitAttempts }
+  }), { timeout: 15_000 }).toEqual({ taskStatus: 'completed', predictionId: 'prediction-e2e', assetStatus: 'completed', submitAttempts: 1 })
+  expect(atlasSubmits).toBe(1)
 })
 
 test('group info page can add and remove members after creation', async ({ page }) => {

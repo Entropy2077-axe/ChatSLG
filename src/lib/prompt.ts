@@ -354,6 +354,7 @@ export interface PersonaGenerationResult {
   personaProfile?: PersonaProfile
   monthlySalary?: number
   outfit: OutfitState
+  visualIdentity?: string
   worldSchedule: Array<Pick<CharacterSchedule, 'dayOfWeek' | 'slot' | 'locationId' | 'activity' | 'phoneAccess' | 'adherence'>>
 }
 
@@ -404,6 +405,7 @@ ${locationTreeText || '当前没有可用地点，日程数组必须为空'}
   "personaProfile": {"facts":["不可改变的身份/背景事实"],"boundaries":["关系边界或禁忌"],"habits":["稳定习惯/口癖"],"behaviorAnchors":["遇到某类情境会如何自然反应"]},
   "monthlySalary": 8000,
   "outfit": {"head":"发型或头饰","top":"上装","bottom":"下装","outerwear":"外套，无则填无","footwear":"鞋袜","accessories":"配饰，无则填无"},
+  "visualIdentity": "用于绘图保持同一人的英文稳定外貌描述，只写成年年龄观感、脸型、肤色、发型发色、眼睛、体型和辨识特征，不写服装动作地点",
   "worldSchedule": [
     { "dayOfWeek": 0, "slot": "morning", "phoneAccess": "unavailable", "adherence": "normal", "locationId": "地点树中的真实ID", "activity": "上班" },
     { "dayOfWeek": 0, "slot": "night", "phoneAccess": "available", "adherence": "optional", "locationId": "地点树中的真实ID", "activity": "休息" }
@@ -481,6 +483,7 @@ export function parsePersonaGeneration(raw: string): PersonaGenerationResult | n
         personaProfile,
         monthlySalary: Number.isFinite(parsed.monthlySalary) ? Math.max(1000, Math.min(200000, Math.round(parsed.monthlySalary))) : undefined,
         outfit,
+        visualIdentity: typeof parsed.visualIdentity === 'string' ? parsed.visualIdentity.trim().slice(0, 500) : undefined,
       }
     }
   } catch {
@@ -653,7 +656,7 @@ ${stylePrompt}${speechSamplesLine}
   - 金钱标记会真实扣除你的余额，必须结合关系、理由和余额慎重决定，不能虚构余额或无理由频繁送钱
   - 不要输出JSON 就正常打字聊天`
 
-  const imageRule = `【发送图片】你可以发送自拍、镜子自拍、穿搭照、物品照或现场照。只有用户在最近对话中明确表示想看，而且你本人明确同意现在发送时，才单独输出标记：[image:selfie|mirror_selfie|outfit|object|scene:portrait|square|landscape:normal|private:不超过100字的画面描述]。把标记放在希望图片出现的位置。拒绝、犹豫、以后再说或用户未索图时绝不能输出。标记不是聊天正文。`
+  const imageRule = `【发送图片】你可以发送自拍、镜子自拍、穿搭照、物品照或现场照。只有用户在最近对话中明确表示想看，而且你本人明确同意现在发送时，才单独输出图片标记。固定格式为：[image:类型:画幅:隐私级别:不超过100字的画面描述]。类型只能填 selfie、mirror_selfie、outfit、object、scene 之一；画幅只能填 portrait、square、landscape 之一；隐私级别只能填 normal、private 之一。示例：[image:selfie:portrait:normal:卧室窗边自然光下的随手自拍]。所有字段必须使用英文冒号分隔，绝不能使用竖线，画面描述不要加引号。把标记放在希望图片出现的位置。拒绝、犹豫、以后再说或用户未索图时绝不能输出。标记不是聊天正文。`
   return {
     logic,
     feeling,

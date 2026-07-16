@@ -27,6 +27,8 @@ import { messagesForAiTurn, recentConversationMessages } from './conversationSta
 import { waitForMessageReveal } from './messagePacing'
 import { modelWorldTimeText } from './worldCalendar'
 import { atlasQuotaAvailable, createAtlasPlaceholder, startAtlasGeneration } from './atlasImage'
+import { applyImageActionReview, attachImageRequestAsset, imageRequestPrompt, isExplicitImageRequest, prepareImageRequest, reviewImageRequest } from './imageRequests'
+import type { ImageRequestTask } from '../types'
 
 /**
  * Per-conversation AI-turn state, deliberately kept in a module-level
@@ -258,6 +260,7 @@ export async function sendMessage(
   }
   await db.messages.add(msg)
   await db.conversations.update(conversationId, { updatedAt: Date.now() })
+  const imageRequestTask = await prepareImageRequest(conversationId, contact.id, msg.id, msg.content)
 
   const world = await ensureWorldInitialized()
   await db.worldEvents.put({
@@ -275,7 +278,7 @@ export async function sendMessage(
   await db.perceivedEvents.put({ id: uuid(), eventId: msg.id, characterId: contact.id, perception: 'full', observedAtStep: world.step })
 
   if (!isCurrentTurn(conversationId, streamId) || controller.signal.aborted) return
-  void runAiTurn(conversationId, contact, settings, stickers, streamId, controller, text.trim())
+  void runAiTurn(conversationId, contact, settings, stickers, streamId, controller, text.trim(), '', imageRequestTask)
 }
 
 /**
@@ -333,6 +336,7 @@ async function runAiTurn(
   controller: AbortController,
   _triggeringUserText = '',
   proactiveContext = '',
+  imageRequestTask?: ImageRequestTask,
 ): Promise<void> {
   const engine = useChatEngineStore.getState()
   const turnStartedAt = performance.now()
@@ -408,6 +412,7 @@ async function runAiTurn(
         situationText,
         lifeEventText ? `【近期生活】${lifeEventText}` : '',
         proactiveContext,
+        imageRequestPrompt(imageRequestTask),
         imageAvailable ? '【图片能力】本轮可发送图片，但仍必须由用户明确索图且你明确同意。' : '【图片能力】本轮图片不可用，不要承诺立即发图，也不要输出图片标记。',
       ].filter(Boolean).join('\n\n'),
       activeIntentText: injectedIntentText,
@@ -541,6 +546,16 @@ async function runAiTurn(
       if (!logicReview.valid) throw new Error(`主模型重写后仍未通过逻辑审查：${logicReview.reason || '未知原因'}`)
     }
     knowledgeQueries = []
+    if (imageRequestTask) {
+      const parsedImage = bubbles.find((bubble): bubble is import('../types').AiBubbleImage => bubble.type === 'image')
+      const imageReview = await reviewImageRequest({ task: imageRequestTask, latestUserText: _triggeringUserText, assistantText: rawText, parsedImage, contact, settings, signal: controller.signal, trace: { turnId: streamId, conversationId } })
+      const acceptedImage = await applyImageActionReview(imageRequestTask, imageReview)
+      const firstImageIndex = bubbles.findIndex((bubble) => bubble.type === 'image')
+      bubbles = bubbles.filter((bubble) => bubble.type !== 'image')
+      if (acceptedImage) bubbles.splice(firstImageIndex >= 0 ? Math.min(firstImageIndex, bubbles.length) : bubbles.length, 0, acceptedImage)
+    } else if (!isExplicitImageRequest(_triggeringUserText)) {
+      bubbles = bubbles.filter((bubble) => bubble.type !== 'image')
+    }
     console.log(`[chat] 收到回复(${finalRaw.length}字) 解析出${bubbles.length}条气泡 mood=${turnMood || '无'} thought=${turnThought ? '有(' + turnThought.length + '字)' : '无'} 对方=${displayName(contact)}`)
     if (bubbles.length === 0) {
       console.warn(`[chat] 本轮没有正常回复 对方=${displayName(contact)} JSON内容: ${jsonRaw.slice(0, 200)}`)
@@ -598,6 +613,7 @@ async function runAiTurn(
       sourceEventId,
       logicContextText,
       assistantEvidenceIds,
+      imageRequestTask?.id,
       controller.signal,
       turnStartedAt,
     )
@@ -628,6 +644,7 @@ async function revealBubbles(
   sourceEventId?: string,
   logicContextText?: string,
   assistantEvidenceIds: string[] = [],
+  imageRequestTaskId?: string,
   signal: AbortSignal = new AbortController().signal,
   turnStartedAt = performance.now(),
 ): Promise<void> {
@@ -641,16 +658,14 @@ async function revealBubbles(
 
   const preparedMessages: Message[] = []
   const atlasAssetIds: string[] = []
-  const recentForImage = await db.messages.where('conversationId').equals(conversationId).reverse().limit(6).toArray()
-  const imageRequestExists = recentForImage.some((message) => message.role === 'user' && /(自拍|照片|拍一张|发.{0,4}(图|照片)|看看你|看一下你|穿搭照|给我看)/i.test(message.content))
   for (const [i, bubble] of bubbles.entries()) {
 
       if (bubble.type === 'image') {
-        if (!imageRequestExists) continue
-        if (!await atlasQuotaAvailable(settings)) continue
+        if (!imageRequestTaskId) { console.warn('[image] 图片动作没有对应索图任务，已拒绝提交'); continue }
+        if (!await atlasQuotaAvailable(settings)) { await db.imageRequests.update(imageRequestTaskId, { status: 'failed', decisionReason: 'Atlas 未启用、API Key 缺失或今日提交次数已达上限', resolvedAt: Date.now(), updatedAt: Date.now() }); continue }
         const imageMessage = await createAtlasPlaceholder(conversationId, contact, settings, bubble, assistantEvidenceIds[i] ?? uuid(), Date.now() + i)
         preparedMessages.push(imageMessage)
-        if (imageMessage.image?.assetId) atlasAssetIds.push(imageMessage.image.assetId)
+        if (imageMessage.image?.assetId) { atlasAssetIds.push(imageMessage.image.assetId); await attachImageRequestAsset(imageRequestTaskId, imageMessage.image.assetId) }
         continue
       }
 
@@ -725,7 +740,6 @@ async function revealBubbles(
   useChatEngineStore.getState().patch(conversationId, { typingLabel: displayName(contact) })
   const stateStartedAt = performance.now()
   const revealedMessages = [firstMessage]
-  let revealBlocked = false
   const stateTask = adjudicateStateChanges({
       scene: 'private_phone',
       conversationId,
@@ -733,13 +747,10 @@ async function revealBubbles(
       settings,
       evidence: [
         ...(sourceEventId && _triggeringUserText ? [{ id: sourceEventId, actorId: 'user', actorName: '用户', content: _triggeringUserText, perceivedBy: [contact.id] }] : []),
-        ...preparedMessages.map((message) => ({ id: message.id, actorId: contact.id, actorName: displayName(contact), content: message.content, perceivedBy: [contact.id] })),
+        ...preparedMessages.map((message) => ({ id: message.id, actorId: contact.id, actorName: displayName(contact), content: message.type === 'scheduleChange' && message.scheduleChange ? `${message.content}\n结构化日程提案=${JSON.stringify(message.scheduleChange)}` : message.content, perceivedBy: [contact.id] })),
       ],
       trace: { turnId: streamId, stage: 'state', conversationId },
-    }).catch((error) => {
-      revealBlocked = true
-      throw error
-    })
+    }).catch((error) => { console.error('[state] 状态裁决失败，聊天与图片仍会正常提交', error); return null })
   const notifyMessage = (message: Message) => {
     if (useChatUiStore.getState().activeConversationId === conversationId) return
     useChatUiStore.getState().showNotification({
@@ -751,7 +762,6 @@ async function revealBubbles(
     notifyMessage(firstMessage)
     for (let index = 1; index < preparedMessages.length; index++) {
       await waitForMessageReveal(preparedMessages[index - 1].content, signal)
-      if (revealBlocked) return false
       if (signal.aborted || !isCurrentTurn(conversationId, streamId)) return false
       const message = preparedMessages[index]
       await db.transaction('rw', db.messages, db.conversations, async () => {
@@ -764,17 +774,14 @@ async function revealBubbles(
     useChatEngineStore.getState().patch(conversationId, { typingLabel: undefined })
     return true
   })()
-  const [stateResult, revealResult] = await Promise.allSettled([stateTask, revealTask])
-  if (stateResult.status === 'rejected' || revealResult.status === 'rejected') {
-    // Pending bubbles are previews. If either parallel branch fails, remove
-    // everything from this turn so visible chat and authoritative state agree.
+  const [, revealResult] = await Promise.allSettled([stateTask, revealTask])
+  if (revealResult.status === 'rejected') {
+    // Message delivery failure still rolls back unrevealed previews. State
+    // adjudication is independent and never cancels an agreed image action.
     await db.messages.bulkDelete(revealedMessages.map((message) => message.id))
     await db.mediaAssets.bulkDelete(atlasAssetIds)
     await db.conversations.update(conversationId, { updatedAt: Date.now() })
-    const failure = stateResult.status === 'rejected'
-      ? stateResult.reason
-      : revealResult.status === 'rejected' ? revealResult.reason : new Error('消息播放失败')
-    throw failure
+    throw revealResult.reason
   }
   await Promise.all(revealedMessages.map((message) => db.messages.update(message.id, { pending: false })))
   if (!revealResult.value) return

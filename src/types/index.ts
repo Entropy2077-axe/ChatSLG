@@ -205,6 +205,13 @@ export interface Moment {
 export type MediaAssetSource = 'atlas' | 'pexels' | 'upload'
 export type MediaAssetOrigin = 'chat' | 'moment' | 'avatar'
 export type MediaAssetStatus = 'queued' | 'generating' | 'completed' | 'failed'
+export type MediaAssetPhase = 'queued' | 'submitting' | 'polling' | 'downloading' | 'decoding' | 'completed' | 'failed'
+export interface MediaAssetTraceEvent {
+  at: number
+  phase: MediaAssetPhase
+  message: string
+  httpStatus?: number
+}
 export interface MediaAsset {
   id: string
   ownerContactId?: string
@@ -221,12 +228,41 @@ export interface MediaAsset {
   prompt?: string
   predictionId?: string
   error?: string
+  phase?: MediaAssetPhase
+  traceEvents?: MediaAssetTraceEvent[]
+  mimeType?: string
+  byteSize?: number
+  lastCheckedAt?: number
+  displayError?: string
   sensitive?: boolean
   photographer?: string
   photographerUrl?: string
   createdAt: number
   completedAt?: number
   deletedAt?: number
+  submitAttempts?: number
+  lastSubmittedAt?: number
+  submissionTimestamps?: number[]
+}
+
+export type ImageRequestStatus = 'pending' | 'accepted' | 'rejected' | 'expired' | 'generating' | 'completed' | 'failed'
+export interface ImageRequestTask {
+  id: string
+  conversationId: string
+  contactId: string
+  requestMessageId: string
+  userRequest: string
+  status: ImageRequestStatus
+  decisionReason?: string
+  imageKind?: AiBubbleImage['kind']
+  aspectRatio?: NonNullable<AiBubbleImage['aspectRatio']>
+  sensitive?: boolean
+  scene?: string
+  mediaAssetId?: string
+  userTurnCount: number
+  createdAt: number
+  updatedAt: number
+  resolvedAt?: number
 }
 
 export interface MomentComment {
@@ -826,10 +862,21 @@ export interface Appointment {
   slot: TimeSlot
   locationId: string
   description: string
-  status: 'planned' | 'fulfilled' | 'missed' | 'cancelled'
+  status: 'proposed' | 'planned' | 'fulfilled' | 'missed' | 'cancelled'
   sourceEventIds: string[]
   createdAt: number
   resolvedAt?: number
+  acceptedParticipantIds?: string[]
+  conversationIds?: string[]
+  updatedAt?: number
+}
+
+export interface StateApplicationReceipt {
+  kind: 'schedule' | 'appointment' | 'outfit' | 'location'
+  characterId: string
+  status: 'applied' | 'duplicate' | 'rejected' | 'failed'
+  reason: string
+  recordIds: string[]
 }
 
 export interface WorldEvent {

@@ -24,6 +24,7 @@ export function MomentsPage() {
   const contacts = useLiveQuery(() => db.contacts.toArray(), []) ?? EMPTY_ARRAY
   const likes = useLiveQuery(() => db.momentLikes.toArray(), []) ?? EMPTY_ARRAY
   const comments = useLiveQuery(() => db.momentComments.toArray(), []) ?? EMPTY_ARRAY
+  const mediaAssets = useLiveQuery(() => db.mediaAssets.toArray(), []) ?? EMPTY_ARRAY
   const stickers = EMPTY_STICKERS
   const [refreshing, setRefreshing] = useState(false)
   const [message, setMessage] = useState('')
@@ -43,6 +44,7 @@ export function MomentsPage() {
   }, [])
 
   const contactById = useMemo(() => new Map(contacts.map((c) => [c.id, c])), [contacts])
+  const mediaAssetById = useMemo(() => new Map(mediaAssets.map((asset) => [asset.id, asset])), [mediaAssets])
   const stickerByName = useMemo(() => new Map(stickers.map((s) => [s.name, s])), [stickers])
   const stickerNames = useMemo(() => stickers.map((s) => s.name), [stickers])
 
@@ -272,9 +274,9 @@ export function MomentsPage() {
                     <p className="mt-1 whitespace-pre-wrap text-[14.5px] leading-relaxed text-gray-900">
                       {m.content}
                     </p>
-                    {m.imageUrl && (
+                    {(m.mediaAssetId ? (mediaAssetById.get(m.mediaAssetId)?.dataUrl || mediaAssetById.get(m.mediaAssetId)?.remoteUrl) : m.imageUrl) && (
                       <img
-                        src={m.imageUrl}
+                        src={m.mediaAssetId ? (mediaAssetById.get(m.mediaAssetId)?.dataUrl || mediaAssetById.get(m.mediaAssetId)?.remoteUrl) : m.imageUrl}
                         alt=""
                         className="mt-2 max-h-64 w-full rounded-lg object-cover"
                         title={m.imagePhotographer ? `照片来自 Pexels · ${m.imagePhotographer}` : undefined}

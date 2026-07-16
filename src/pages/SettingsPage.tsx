@@ -11,6 +11,7 @@ import { db } from '../db/db'
 import { assertTalkBackup, backupFileName, createBackup, restoreBackup } from '../lib/backup'
 import type { AppSettings } from '../types'
 import { useLiveQuery } from 'dexie-react-hooks'
+import { fetchAtlasBalance, type AtlasBalance } from '../lib/atlasImage'
 
 export function SettingsPage() {
   const navigate = useNavigate()
@@ -55,6 +56,9 @@ export function SettingsPage() {
     setBackupStatus('')
     const settings = { ...useSettingsStore.getState() } as Partial<AppSettings> & { setSettings?: unknown }
     delete settings.setSettings
+    delete settings.apiKey
+    delete settings.pexelsApiKey
+    delete settings.atlasApiKey
     const backup = await createBackup(settings)
     const blob = new Blob([JSON.stringify(backup, null, 2)], { type: 'application/json' })
     const url = URL.createObjectURL(blob)
@@ -113,6 +117,9 @@ export function SettingsPage() {
   const [testResult, setTestResult] = useState<{ ok: boolean; message: string } | null>(null)
   const [pexelsTesting, setPexelsTesting] = useState(false)
   const [pexelsTestResult, setPexelsTestResult] = useState<{ ok: boolean; message: string } | null>(null)
+  const [atlasBalanceLoading, setAtlasBalanceLoading] = useState(false)
+  const [atlasBalance, setAtlasBalance] = useState<AtlasBalance | null>(null)
+  const [atlasBalanceError, setAtlasBalanceError] = useState('')
 
   function persistConnection() {
     setSettings({ apiKey: apiKeyDraft.trim(), baseUrl: baseUrlDraft.trim(), model: modelDraft.trim() })
@@ -170,6 +177,17 @@ export function SettingsPage() {
     }
   }
 
+  async function handleAtlasBalance() {
+    const key = atlasKeyDraft.trim()
+    setAtlasBalanceLoading(true)
+    setAtlasBalance(null)
+    setAtlasBalanceError('')
+    setSettings({ atlasApiKey: key })
+    try { setAtlasBalance(await fetchAtlasBalance(key)) }
+    catch (error) { setAtlasBalanceError(error instanceof Error ? error.message : String(error)) }
+    finally { setAtlasBalanceLoading(false) }
+  }
+
   function restoreDefaultPrompt() {
     setPromptDraft(DEFAULT_STYLE_PROMPT)
     setSettings({ globalSystemPrompt: DEFAULT_STYLE_PROMPT })
@@ -193,6 +211,9 @@ export function SettingsPage() {
         <label className="flex items-center justify-between py-2 text-sm"><span>启用聊天图片</span><input type="checkbox" checked={atlasImageEnabled} onChange={(e)=>setSettings({atlasImageEnabled:e.target.checked})}/></label>
         <label className="mb-1 block text-xs text-gray-500">Atlas API Key</label>
         <input value={atlasKeyDraft} onChange={(e)=>setAtlasKeyDraft(e.target.value)} onBlur={()=>setSettings({atlasApiKey:atlasKeyDraft.trim()})} type="password" placeholder="Atlas Cloud API Key" className="mb-3 w-full rounded-lg border border-gray-200 px-3 py-2 text-sm"/>
+        <button type="button" disabled={atlasBalanceLoading || !atlasKeyDraft.trim()} onClick={()=>void handleAtlasBalance()} className="mb-2 w-full rounded-lg bg-gray-900 py-2 text-sm text-white disabled:opacity-40">{atlasBalanceLoading?'正在查询余额…':'查询 Atlas 余额'}</button>
+        {atlasBalance&&<div className="mb-3 grid grid-cols-2 gap-2 rounded-lg bg-gray-50 p-3 text-xs"><p><span className="text-gray-400">可用余额</span><strong className="mt-0.5 block text-base text-green-600">${Number(atlasBalance.available.value).toFixed(4)}</strong></p><p><span className="text-gray-400">现金余额</span><span className="mt-1 block">${Number(atlasBalance.cash?.value||0).toFixed(4)}</span></p><p><span className="text-gray-400">赠送额度</span><span className="mt-1 block">${Number(atlasBalance.bonus?.value||0).toFixed(4)}</span></p><p><span className="text-gray-400">冻结金额</span><span className="mt-1 block">${Number(atlasBalance.frozen?.value||0).toFixed(4)}</span></p></div>}
+        {atlasBalanceError&&<p className="mb-3 rounded-lg bg-red-50 p-2 text-xs text-red-500">{atlasBalanceError}</p>}
         <label className="mb-1 block text-xs text-gray-500">文生图模型</label>
         <select value={atlasImageModel} onChange={(e)=>setSettings({atlasImageModel:e.target.value})} className="mb-3 w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm">
           <option value="z-image/turbo">Z-Image Turbo · 约 $0.005/张 · 极速低价</option>

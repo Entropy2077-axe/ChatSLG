@@ -12,7 +12,8 @@ const envKey = import.meta.env.VITE_DEEPSEEK_API_KEY ?? ''
 const envBaseUrl = import.meta.env.VITE_DEEPSEEK_BASE_URL ?? 'https://api.deepseek.com'
 const envPexelsKey = import.meta.env.VITE_PEXELS_API_KEY ?? ''
 
-export const useSettingsStore = create<SettingsState>()(
+function createSettingsStore() {
+  return create<SettingsState>()(
   persist(
     (set) => ({
       apiKey: envKey,
@@ -98,4 +99,14 @@ export const useSettingsStore = create<SettingsState>()(
       },
     },
   ),
-)
+  )
+}
+
+type SettingsStore = ReturnType<typeof createSettingsStore>
+const globalStore = globalThis as typeof globalThis & { __chatSlgSettingsStore?: SettingsStore }
+
+// Background workers and Vite dynamic imports must observe the same live settings snapshot.
+// Keeping the persisted store global also prevents HMR from briefly creating a second store
+// whose default API key can race a queued contact or image task.
+export const useSettingsStore = globalStore.__chatSlgSettingsStore ?? createSettingsStore()
+globalStore.__chatSlgSettingsStore = useSettingsStore

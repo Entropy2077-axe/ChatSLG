@@ -147,9 +147,24 @@ export function parseRawPrivateDraft(raw: string, fallbackMood: string = '😌')
       line = line.slice(1, -1).trim()
     }
     if (!line) continue
-    const image = line.match(/^\[image:(selfie|mirror_selfie|outfit|object|scene):(portrait|square|landscape):(normal|private):(.+)\]$/i)
+    // Older prompts displayed alternatives with `|`, which some models copied as
+    // real separators. Accept both forms so a valid image action never leaks as
+    // visible marker text, while the prompt now teaches the canonical `:` form.
+    const imagePattern = /\[image:(selfie|mirror_selfie|outfit|object|scene)[:|](portrait|square|landscape)[:|](normal|private)[:|]([^\]]+)\]/ig
+    const imageMatches = [...line.matchAll(imagePattern)]
     const finance = parseFinanceMarker(line)
-    if (image) bubbles.push({ type:'image', kind:image[1] as 'selfie'|'mirror_selfie'|'outfit'|'object'|'scene', aspectRatio:image[2] as 'portrait'|'square'|'landscape', sensitive:image[3].toLowerCase()==='private', scene:image[4].trim().slice(0,300), thought })
+    if (imageMatches.length) {
+      let cursor = 0
+      for (const image of imageMatches) {
+        const before = line.slice(cursor, image.index).trim()
+        if (before) bubbles.push({ type: 'text', content: before, thought })
+        const scene = image[4].trim().replace(/^[“”"'‘’]+|[“”"'‘’]+$/g, '').trim().slice(0, 300)
+        if (scene) bubbles.push({ type:'image', kind:image[1] as 'selfie'|'mirror_selfie'|'outfit'|'object'|'scene', aspectRatio:image[2] as 'portrait'|'square'|'landscape', sensitive:image[3].toLowerCase()==='private', scene, thought })
+        cursor = (image.index ?? 0) + image[0].length
+      }
+      const after = line.slice(cursor).trim()
+      if (after) bubbles.push({ type: 'text', content: after, thought })
+    }
     else if (finance) bubbles.push({ ...finance, thought })
     else bubbles.push({ type: 'text', content: line, thought })
   }

@@ -1,6 +1,6 @@
 import { v4 as uuid } from 'uuid'
 import { db } from '../db/db'
-import type { AdminAiTraceStage, AppSettings, OutfitPart, PendingStateIntent, TimeSlot } from '../types'
+import type { AdminAiTraceStage, AppSettings, OutfitPart, PendingStateIntent, StateApplicationReceipt, TimeSlot } from '../types'
 import { chatCompletion } from './deepseek'
 import { extractJsonObject } from './aiProtocol'
 import { buildLogicContext, type LogicContextBundle } from './logicContext'
@@ -50,6 +50,7 @@ export interface StateAdjudicationResult {
   pendingIntents: PendingStateIntent[]
   worldVersion: number
   day: number
+  receipts: StateApplicationReceipt[]
 }
 
 const OUTFIT_PARTS: OutfitPart[] = ['head', 'top', 'bottom', 'outerwear', 'footwear', 'accessories']
@@ -166,13 +167,18 @@ async function markEvidenceConsumed(evidenceIds: string[], kind: 'outfit' | 'sch
   }
 }
 
-async function applyDecision(input: StateAdjudicationInput, decision: StateDecision, worldVersion: number, day: number): Promise<void> {
-  if (!input.characterIds.includes(decision.characterId)) return
+async function applyDecision(input: StateAdjudicationInput, decision: StateDecision, worldVersion: number, day: number): Promise<StateApplicationReceipt[]> {
+  const receipts: StateApplicationReceipt[] = []
+  const receipt = (kind: StateApplicationReceipt['kind'], status: StateApplicationReceipt['status'], reason: string, recordIds: string[] = []) => receipts.push({ kind, characterId: decision.characterId, status, reason, recordIds })
+  if (!input.characterIds.includes(decision.characterId)) { receipt('schedule', 'rejected', '角色不在本轮可裁决名单中'); return receipts }
   const contact = await db.contacts.get(decision.characterId)
-  if (!contact) return
+  if (!contact) { receipt('schedule', 'rejected', '联系人不存在'); return receipts }
   const allowedEvidence = new Set(input.evidence.filter((event) => event.perceivedBy.includes(contact.id) || event.actorId === contact.id).map((event) => event.id))
   const evidenceIds = [...new Set((decision.evidenceIds ?? []).filter((id) => allowedEvidence.has(id)))]
-  if (evidenceIds.length === 0) return
+  if (evidenceIds.length === 0) {
+    for (const kind of ['outfit', 'schedule', 'location'] as const) if (decision[kind]?.shouldChange) receipt(kind, 'rejected', '没有引用本轮中该角色真实感知的证据ID')
+    return receipts
+  }
 
   if (decision.outfit?.shouldChange === true && decision.outfit.patch) {
     const patch = Object.fromEntries(OUTFIT_PARTS.flatMap((part) => {
@@ -195,29 +201,47 @@ async function applyDecision(input: StateAdjudicationInput, decision: StateDecis
         const slots = immediate ? undefined : normalizedSlots(decision.outfit.slots?.filter((value): value is TimeSlot => SLOTS.includes(value)))
         const duplicate = await db.outfitConstraints.where('characterId').equals(contact.id).filter((item) => item.startDay === startDay && item.endDay === endDay && JSON.stringify(item.slots ?? []) === JSON.stringify(slots ?? []) && samePatch(item.patch as Record<string, string>, patch)).first()
         if (!duplicate) {
-          await addOutfitConstraint({ characterId: contact.id, startDay, endDay, slots, patch, sourceEventIds: evidenceIds, reason: decision.outfit.reason?.trim().slice(0, 160) || '本轮明确改变衣着', conversationId: input.conversationId })
+          const row = await addOutfitConstraint({ characterId: contact.id, startDay, endDay, slots, patch, sourceEventIds: evidenceIds, reason: decision.outfit.reason?.trim().slice(0, 160) || '本轮明确改变衣着', conversationId: input.conversationId })
           await markEvidenceConsumed(input.evidence.map((event) => event.id), 'outfit')
-        }
-      }
-    }
+          receipt('outfit', 'applied', '衣着约束已写入数据库', [row.id])
+        } else receipt('outfit', 'duplicate', '相同衣着约束已经存在', [duplicate.id])
+      } else receipt('outfit', 'rejected', '衣着约束日期范围无效')
+    } else receipt('outfit', Object.keys(patch).length === 0 ? 'rejected' : 'duplicate', Object.keys(patch).length === 0 ? '衣着变更没有有效部位' : '角色当前已经是目标衣着')
   }
 
-  if (decision.schedule?.shouldChange === true && typeof decision.schedule.locationId === 'string' && typeof decision.schedule.activity === 'string' && typeof decision.schedule.reason === 'string') {
+  if (decision.schedule?.shouldChange === true) {
+    if (typeof decision.schedule.locationId !== 'string' || !decision.schedule.locationId) receipt('schedule', 'rejected', '日程缺少合法locationId')
+    else if (typeof decision.schedule.activity !== 'string' || !decision.schedule.activity.trim()) receipt('schedule', 'rejected', '日程缺少activity')
+    else if (typeof decision.schedule.reason !== 'string' || !decision.schedule.reason.trim()) receipt('schedule', 'rejected', '日程缺少reason')
+    else {
     const startDay = Number(decision.schedule.startDay), endDay = Number(decision.schedule.endDay ?? startDay)
     const slots = decision.schedule.slots?.filter((value): value is TimeSlot => SLOTS.includes(value))
-    if (Number.isInteger(startDay) && Number.isInteger(endDay) && startDay >= day && endDay >= startDay && slots?.length && await isLeafLocation(decision.schedule.locationId) && ['available', 'unavailable'].includes(String(decision.schedule.phoneAccess)) && ['override', 'commitment'].includes(String(decision.schedule.priority))) {
+    const invalidReason = !Number.isInteger(startDay) || !Number.isInteger(endDay) || startDay < day || endDay < startDay ? '日程日期范围无效'
+      : !slots?.length ? '日程缺少有效时段slots'
+      : !await isLeafLocation(decision.schedule.locationId) ? '日程地点不是合法叶子地点ID'
+      : !['available', 'unavailable'].includes(String(decision.schedule.phoneAccess)) ? '日程phoneAccess无效'
+      : !['override', 'commitment'].includes(String(decision.schedule.priority)) ? '日程priority无效'
+      : ''
+    if (!invalidReason) {
       const normalized = normalizedSlots(slots)
       const duplicate = await db.scheduleConstraints.where('characterId').equals(contact.id).filter((item) => item.startDay === startDay && item.endDay === endDay && item.locationId === decision.schedule!.locationId && item.activity === decision.schedule!.activity!.trim() && JSON.stringify(item.slots ?? []) === JSON.stringify(normalized ?? [])).first()
       if (!duplicate) {
-        await addScheduleConstraint({ characterId: contact.id, startDay, endDay, slots: normalized, locationId: decision.schedule.locationId, activity: decision.schedule.activity.trim().slice(0, 120), phoneAccess: decision.schedule.phoneAccess!, priority: decision.schedule.priority!, sourceEventIds: evidenceIds, reason: decision.schedule.reason.trim().slice(0, 160), conversationId: input.conversationId })
+        const row = await addScheduleConstraint({ characterId: contact.id, startDay, endDay, slots: normalized, locationId: decision.schedule.locationId, activity: decision.schedule.activity.trim().slice(0, 120), phoneAccess: decision.schedule.phoneAccess!, priority: decision.schedule.priority!, sourceEventIds: evidenceIds, reason: decision.schedule.reason.trim().slice(0, 160), conversationId: input.conversationId })
         await markEvidenceConsumed(input.evidence.map((event) => event.id), 'schedule')
-      }
+        receipt('schedule', 'applied', '日程约束已写入数据库', [row.id])
+      } else receipt('schedule', 'duplicate', '相同日程约束已经存在', [duplicate.id])
+    } else receipt('schedule', 'rejected', invalidReason)
     }
   }
 
-  if (decision.location?.shouldChange === true && typeof decision.location.locationId === 'string' && typeof decision.location.reason === 'string' && contact.currentLocationId !== decision.location.locationId && await isLeafLocation(decision.location.locationId)) {
+  if (decision.location?.shouldChange === true) {
+    if (typeof decision.location.locationId !== 'string' || !decision.location.locationId) receipt('location', 'rejected', '地点变更缺少locationId')
+    else if (typeof decision.location.reason !== 'string' || !decision.location.reason.trim()) receipt('location', 'rejected', '地点变更缺少reason')
+    else if (contact.currentLocationId === decision.location.locationId) receipt('location', 'duplicate', '角色已经在目标地点')
+    else if (!await isLeafLocation(decision.location.locationId)) receipt('location', 'rejected', '目标地点不是合法叶子地点')
+    else {
     const latest = await db.worldState.get('global')
-    if (!latest || latest.worldVersion !== worldVersion) return
+    if (!latest || latest.worldVersion !== worldVersion) { receipt('location', 'rejected', '世界状态版本已经变化'); return receipts }
     const movementId = uuid(), now = Date.now()
     await db.transaction('rw', [db.contacts, db.worldEvents, db.perceivedEvents], async () => {
       await db.contacts.update(contact.id, { currentLocationId: decision.location!.locationId })
@@ -225,7 +249,10 @@ async function applyDecision(input: StateAdjudicationInput, decision: StateDecis
       await db.perceivedEvents.add({ id: uuid(), eventId: movementId, characterId: contact.id, perception: 'full', observedAtStep: latest.step })
     })
     await markEvidenceConsumed(input.evidence.map((event) => event.id), 'location')
+    receipt('location', 'applied', '角色当前位置已更新', [movementId])
+    }
   }
+  return receipts
 }
 
 function buildUnifiedPrompt(input: StateAdjudicationInput, stateText: string, recentText: string, evidenceText: string, pending: PendingStateIntent[]): string {
@@ -277,7 +304,11 @@ JSON协议：
 export async function adjudicateStateChanges(input: StateAdjudicationInput): Promise<StateAdjudicationResult | null> {
   if (!input.settings.apiKey || input.characterIds.length === 0 || input.evidence.length === 0) return null
   const uniqueIds = [...new Set(input.characterIds)]
-  const bundles = await Promise.all(uniqueIds.map((characterId) => buildLogicContext({ subjectId: characterId, participantIds: uniqueIds, conversationId: input.conversationId, query: input.evidence.map((item) => item.content).join('\n').slice(0, 2_000) })))
+  const query = input.evidence.map((item) => item.content).join('\n').slice(0, 2_000)
+  const allContacts = await db.contacts.toArray()
+  const mentionedIds = allContacts.filter((contact) => !uniqueIds.includes(contact.id) && [contact.name, contact.nickname, contact.realName].filter(Boolean).some((name) => query.includes(String(name)))).map((contact) => contact.id)
+  const contextIds = [...new Set([...uniqueIds, ...mentionedIds])]
+  const bundles = await Promise.all(contextIds.map((characterId) => buildLogicContext({ subjectId: characterId, participantIds: contextIds, conversationId: input.conversationId, query })))
   const worldVersion = bundles[0].worldVersion
   if (bundles.some((bundle) => bundle.worldVersion !== worldVersion)) return null
   const queryText = input.evidence.map((item) => item.content).join('\n')
@@ -304,9 +335,9 @@ export async function adjudicateStateChanges(input: StateAdjudicationInput): Pro
     for (const message of group) consumedEvidenceIds.add(message.id)
   }
   const activeEvidence = input.evidence.filter((event) => !consumedEvidenceIds.has(event.id))
-  if (activeEvidence.length === 0) return { review: { valid: true, reason: '' }, decisions: [], pendingIntents: [], worldVersion, day: bundles[0].clock.day }
+  if (activeEvidence.length === 0) return { review: { valid: true, reason: '' }, decisions: [], pendingIntents: [], worldVersion, day: bundles[0].clock.day, receipts: [] }
   const evidenceText = activeEvidence.map((event) => `${event.id} | actorId=${event.actorId} | actor=${event.actorName} | perceivedBy=${event.perceivedBy.join(',')} | ${event.content}`).join('\n')
-  const contactRows = await db.contacts.bulkGet(uniqueIds)
+  const contactRows = await db.contacts.bulkGet(contextIds)
   const contactNames = new Map(contactRows.filter((contact): contact is NonNullable<typeof contact> => !!contact).map((contact) => [contact.id, contact.name]))
   // Preserve complete conversational turns. A clipped sentence is especially
   // dangerous here because consent, negation, time and destination often sit
@@ -397,8 +428,9 @@ ${evidenceText}
     return changes.length ? [`${contactNames.get(decision.characterId) ?? decision.characterId}｜${changes.join('；')}`] : []
   })
   console.info(`[状态裁决｜${sceneLabel}] ${readableDecisions.length ? readableDecisions.join(' / ') : '无状态变化'}`)
+  const adjudicationTraceId = uuid()
   await db.aiTurns.add({
-    id: uuid(), conversationId: input.conversationId, raw,
+    id: adjudicationTraceId, conversationId: input.conversationId, raw,
     parsed: { kind: 'unifiedTurnAdjudication', scene: input.scene, evidence: input.evidence, review: adjudication.review, decisions, pendingIntents: adjudication.pendingIntents, estimatedInputTokens },
     knowledgeQueries: [],
     logicTrace: {
@@ -419,33 +451,63 @@ ${evidenceText}
     pendingIntents: adjudication.pendingIntents.filter((item) => uniqueIds.includes(item.characterId)).slice(-6),
     worldVersion,
     day: bundles[0].clock.day,
+    receipts: [],
   }
   if (input.apply === false || !result.review.valid) return result
-  await commitStateAdjudication(input, result)
+  try {
+    result.receipts = await commitStateAdjudication(input, result)
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error)
+    result.receipts = result.decisions.flatMap((decision) => {
+      const failed: StateApplicationReceipt[] = (['outfit', 'schedule', 'location'] as const)
+        .filter((kind) => decision[kind]?.shouldChange === true)
+        .map((kind) => ({ kind, characterId: decision.characterId, status: 'failed' as const, reason: `数据库事务提交失败：${reason}`, recordIds: [] }))
+      if ((decision.schedule?.participantIds?.length ?? 0) > 1) failed.push({ kind: 'appointment', characterId: decision.characterId, status: 'failed', reason: `数据库事务提交失败：${reason}`, recordIds: [] })
+      return failed
+    })
+    console.error('[state] 数据库事务已整体回滚', reason)
+  }
+  const trace = await db.aiTurns.get(adjudicationTraceId)
+  if (trace?.parsed && typeof trace.parsed === 'object') await db.aiTurns.update(adjudicationTraceId, { parsed: { ...(trace.parsed as Record<string, unknown>), receipts: result.receipts } })
   return result
 }
 
-export async function commitStateAdjudication(input: StateAdjudicationInput, result: StateAdjudicationResult): Promise<void> {
+export async function commitStateAdjudication(input: StateAdjudicationInput, result: StateAdjudicationResult): Promise<StateApplicationReceipt[]> {
+  return await db.transaction('rw', [db.worldState, db.conversations, db.contacts, db.messages, db.outfitConstraints, db.scheduleConstraints, db.locations, db.worldEvents, db.perceivedEvents, db.appointments], async () => {
   const latestWorld = await db.worldState.get('global')
   if (!latestWorld || latestWorld.worldVersion !== result.worldVersion) throw new Error('世界状态已变化，统一裁决结果不能提交')
-  const uniqueIds = [...new Set(input.characterIds)]
   const decisions = result.decisions
+  const receipts: StateApplicationReceipt[] = []
   const conversation = await db.conversations.get(input.conversationId)
   if (conversation) await db.conversations.update(input.conversationId, { pendingStateIntents: result.pendingIntents })
-  for (const decision of decisions) await applyDecision(input, decision, result.worldVersion, result.day)
+  for (const decision of decisions) receipts.push(...await applyDecision(input, decision, result.worldVersion, result.day))
   const appointmentGroups = new Map<string, { participantIds: string[]; day: number; slot: TimeSlot; locationId: string; description: string; evidenceIds: string[] }>()
   for (const decision of decisions) {
     const schedule = decision.schedule
     if (schedule?.shouldChange !== true || schedule.priority !== 'commitment' || !Number.isInteger(schedule.startDay) || !schedule.slots?.length || !schedule.locationId || !Array.isArray(schedule.participantIds)) continue
-    const participantIds = [...new Set(schedule.participantIds.filter((id) => id === 'user' || uniqueIds.includes(id)))].sort()
+    const knownContacts = new Set((await db.contacts.toCollection().primaryKeys()).map(String))
+    const participantIds = [...new Set(schedule.participantIds.filter((id) => id === 'user' || knownContacts.has(id)))].sort()
     if (participantIds.length < 2 || !participantIds.includes(decision.characterId)) continue
-    const matchingAi = participantIds.filter((id) => id !== 'user')
-    if (!matchingAi.every((id) => decisions.some((candidate) => candidate.characterId === id && candidate.schedule?.shouldChange === true && candidate.schedule.startDay === schedule.startDay && candidate.schedule.locationId === schedule.locationId && candidate.schedule.slots?.includes(schedule.slots![0])))) continue
     const key = `${schedule.startDay}/${schedule.slots[0]}/${schedule.locationId}/${participantIds.join(',')}`
-    appointmentGroups.set(key, { participantIds, day: schedule.startDay!, slot: schedule.slots[0], locationId: schedule.locationId, description: schedule.activity || schedule.reason || '共同约定', evidenceIds: [...new Set(decision.evidenceIds ?? [])] })
+    const current = appointmentGroups.get(key)
+    appointmentGroups.set(key, { participantIds, day: schedule.startDay!, slot: schedule.slots[0], locationId: schedule.locationId, description: current?.description || schedule.activity || schedule.reason || '共同约定', evidenceIds: [...new Set([...(current?.evidenceIds ?? []), ...(decision.evidenceIds ?? [])])] })
   }
   for (const appointment of appointmentGroups.values()) {
-    const duplicate = await db.appointments.filter((item) => item.status === 'planned' && item.day === appointment.day && item.slot === appointment.slot && item.locationId === appointment.locationId && [...item.participantIds].sort().join(',') === appointment.participantIds.join(',')).first()
-    if (!duplicate) await db.appointments.add({ id: uuid(), ...appointment, status: 'planned', sourceEventIds: appointment.evidenceIds, createdAt: Date.now() })
+    const existing = await db.appointments.filter((item) => ['proposed', 'planned'].includes(item.status) && item.day === appointment.day && item.slot === appointment.slot && item.locationId === appointment.locationId && [...item.participantIds].sort().join(',') === appointment.participantIds.join(',')).first()
+    const acceptedThisTurn = decisions.filter((decision) => appointment.participantIds.includes(decision.characterId) && decision.schedule?.shouldChange === true && decision.schedule.startDay === appointment.day && decision.schedule.locationId === appointment.locationId && decision.schedule.slots?.includes(appointment.slot)).map((decision) => decision.characterId)
+    const acceptedParticipantIds = [...new Set([...(existing?.acceptedParticipantIds ?? []), ...acceptedThisTurn])]
+    const requiredAi = appointment.participantIds.filter((id) => id !== 'user')
+    const status = requiredAi.every((id) => acceptedParticipantIds.includes(id)) ? 'planned' as const : 'proposed' as const
+    const now = Date.now()
+    if (existing) {
+      await db.appointments.update(existing.id, { acceptedParticipantIds, conversationIds: [...new Set([...(existing.conversationIds ?? []), input.conversationId])], sourceEventIds: [...new Set([...existing.sourceEventIds, ...appointment.evidenceIds])], status, updatedAt: now })
+      receipts.push({ kind: 'appointment', characterId: acceptedThisTurn[0] ?? '', status: status === 'planned' ? 'applied' : 'applied', reason: status === 'planned' ? '共同约定已获得全部AI参与者确认' : '已记录当前角色同意，等待其他参与者确认', recordIds: [existing.id] })
+    } else {
+      const id = uuid()
+      await db.appointments.add({ id, ...appointment, status, acceptedParticipantIds, conversationIds: [input.conversationId], sourceEventIds: appointment.evidenceIds, createdAt: now, updatedAt: now })
+      receipts.push({ kind: 'appointment', characterId: acceptedThisTurn[0] ?? '', status: 'applied', reason: status === 'planned' ? '共同约定已确认' : '共同约定已创建，等待其他参与者确认', recordIds: [id] })
+    }
   }
+  return receipts
+  })
 }

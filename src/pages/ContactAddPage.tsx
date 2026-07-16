@@ -20,6 +20,7 @@ import { customTraitsValidationError } from '../lib/contactCreator'
 import { ensureWorldInitialized } from '../lib/world'
 import { OUTFIT_FIELDS } from '../lib/outfit'
 import { enqueueContactCreation } from '../lib/contactCreationQueue'
+import { stableVisualSeed } from '../lib/contactVisual'
 import { CONTACT_RELATION_LABELS, HOBBY_TAG_OPTIONS, PERSONALITY_TRAIT_OPTIONS, type ContactRelationLabel, type CustomPersonalityTrait } from '../types'
 import {
   AGE_RANGE_OPTIONS,
@@ -225,6 +226,8 @@ export function ContactAddPage() {
         personaProfile: parsed.personaProfile,
         speechSamples: parsed.speechSamples,
         outfit: { ...parsed.outfit, updatedAt: now, sourceEventIds: [] },
+        visualIdentity: parsed.visualIdentity,
+        visualSeed: stableVisualSeed(id),
         createdAt: now,
         memoryFacts: '',
         memoryStyle: '',

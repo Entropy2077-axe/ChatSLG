@@ -702,7 +702,6 @@ async function revealGroupBubbles(
   useChatEngineStore.getState().patch(conversationId, { typingLabel: nextSpeaker ? displayName(nextSpeaker) : '群成员' })
   const stateStartedAt = performance.now()
   const revealedMessages = [firstMessage]
-  let revealBlocked = false
   const stateTask = (async () => {
     const listenerIds = conversation?.channel === 'scene' && conversation.sceneLocationId
       ? (await Promise.all(speakers.map(async (speaker) => ({ id: speaker.id, heard: speaker.currentLocationId ? await audibilityBetween(conversation.sceneLocationId!, speaker.currentLocationId) : 'none' })))).filter((item) => item.heard === 'clear').map((item) => item.id)
@@ -721,10 +720,7 @@ async function revealGroupBubbles(
       ],
       trace: { turnId: streamId, stage: 'state', conversationId },
     })
-  })().catch((error) => {
-    revealBlocked = true
-    throw error
-  })
+  })().catch((error) => { console.error('[state] 群聊状态裁决失败，聊天仍会正常提交', error); return null })
   const notifyMessage = (message: Message) => {
     if (conversation?.channel === 'scene' || useChatUiStore.getState().activeConversationId === conversationId) return
     const speaker = members.find((member) => member.id === message.speakerContactId)
@@ -738,7 +734,6 @@ async function revealGroupBubbles(
     notifyMessage(firstMessage)
     for (let index = 1; index < messages.length; index++) {
       await waitForMessageReveal(messages[index - 1].content, signal)
-      if (revealBlocked) return false
       if (signal.aborted || streamByConversation.get(conversationId) !== streamId) return false
       const message = messages[index]
       await db.transaction('rw', db.messages, db.conversations, async () => {
@@ -756,14 +751,11 @@ async function revealGroupBubbles(
     useChatEngineStore.getState().patch(conversationId, { typingLabel: undefined })
     return true
   })()
-  const [stateResult, revealResult] = await Promise.allSettled([stateTask, revealTask])
-  if (stateResult.status === 'rejected' || revealResult.status === 'rejected') {
+  const [, revealResult] = await Promise.allSettled([stateTask, revealTask])
+  if (revealResult.status === 'rejected') {
     await db.messages.bulkDelete(revealedMessages.map((message) => message.id))
     await db.conversations.update(conversationId, { updatedAt: Date.now() })
-    const failure = stateResult.status === 'rejected'
-      ? stateResult.reason
-      : revealResult.status === 'rejected' ? revealResult.reason : new Error('群聊消息播放失败')
-    throw failure
+    throw revealResult.reason
   }
   await Promise.all(revealedMessages.map((message) => db.messages.update(message.id, { pending: false })))
   if (!revealResult.value) return
