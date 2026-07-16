@@ -44,17 +44,8 @@ export function ageFromBirthday(birthday: string): number | null {
   return age
 }
 
-/** Local (not UTC) "YYYY-MM-DD" key, used to compare against PlanItem.date for expiry. */
+/** Local (not UTC) date key for operational API budgets and real-time cooldown caps only. */
 export function toDateKey(date: Date): string {
   const pad = (n: number) => n.toString().padStart(2, '0')
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`
-}
-
-/** Full, model-facing description of "right now" — recomputed fresh for every request. */
-export function describeCurrentTime(date: Date): string {
-  const pad = (n: number) => n.toString().padStart(2, '0')
-  const dateStr = `${date.getFullYear()}年${date.getMonth() + 1}月${date.getDate()}日`
-  const weekday = WEEKDAYS[date.getDay()]
-  const timeStr = `${pad(date.getHours())}:${pad(date.getMinutes())}`
-  return `${dateStr} ${weekday} ${timeStr}`
 }

@@ -293,6 +293,9 @@ export class ChatSLGDB extends Dexie {
         }
       }
     })
+    this.version(30).stores({
+      groupPlans: 'id, groupId, status, worldDay, worldSlot, createdAt, [groupId+createdAt]',
+    })
   }
 }
 

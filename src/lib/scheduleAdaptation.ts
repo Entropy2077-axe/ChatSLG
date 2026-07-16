@@ -8,7 +8,7 @@ import type { AppSettings, CharacterSchedule, TimeSlot } from '../types'
 export interface ScheduleAdaptationDraft {
   worldVersion: number
   characterId: string
-  schedules: Array<Pick<CharacterSchedule, 'slot' | 'locationId' | 'activity' | 'phoneAccess' | 'dayOfWeek'>>
+  schedules: Array<Pick<CharacterSchedule, 'slot' | 'locationId' | 'activity' | 'phoneAccess' | 'dayOfWeek' | 'adherence'>>
 }
 
 export async function generateScheduleAdaptation(characterId: string, settings: AppSettings): Promise<ScheduleAdaptationDraft> {
@@ -17,7 +17,7 @@ export async function generateScheduleAdaptation(characterId: string, settings: 
   const context = formatLogicContext(bundle)
   const raw = await chatCompletion({
     apiKey: settings.apiKey, baseUrl: settings.baseUrl, model: settings.model, jsonMode: true, purpose: 'other',
-    messages: [{ role: 'system', content: `${context}\n\n你只负责提出新的基础日程草稿，不改变当前状态、约定或临时日程。四个时段各输出一项，地点ID只能使用地点树中标为leaf-enterable的叶子地点。只输出JSON:{"worldVersion":${bundle.worldVersion},"characterId":"${characterId}","schedules":[{"slot":"morning|day|evening|night","locationId":"合法叶子ID","activity":"活动","phoneAccess":"available|unavailable"}]}` }, { role: 'user', content: '重新适配基础日程草稿' }],
+    messages: [{ role: 'system', content: `${context}\n\n你只负责提出新的基础日程草稿，不改变当前状态、约定或临时日程。四个时段各输出一项，作为每天都适用的兜底日程；地点ID只能使用地点树中标为leaf-enterable的叶子地点。每项必须给出adherence：required=通常不可自行偏离，normal=需充分理由，optional=可自由调整。工作、课程和明确责任不能只因角色懒散而标成optional。只输出JSON:{"worldVersion":${bundle.worldVersion},"characterId":"${characterId}","schedules":[{"slot":"morning|day|evening|night","locationId":"合法叶子ID","activity":"活动","phoneAccess":"available|unavailable","adherence":"required|normal|optional"}]}` }, { role: 'user', content: '重新适配基础日程草稿' }],
   })
   const json = extractJsonObject(raw)
   if (!json) throw new Error('日程模型没有返回有效JSON')
@@ -27,9 +27,9 @@ export async function generateScheduleAdaptation(characterId: string, settings: 
   const parentIds = new Set(bundle.locations.map((item) => item.parentId).filter(Boolean))
   const locationIds = new Set(bundle.locations.filter((item) => !parentIds.has(item.id)).map((item) => item.id))
   const schedules = parsed.schedules.map((item) => {
-    if (!['morning', 'day', 'evening', 'night'].includes(item.slot) || slots.has(item.slot) || !locationIds.has(item.locationId) || !item.activity?.trim() || !['available', 'unavailable'].includes(item.phoneAccess)) throw new Error('日程草稿包含重复时段、非法地点或空活动')
+    if (!['morning', 'day', 'evening', 'night'].includes(item.slot) || slots.has(item.slot) || !locationIds.has(item.locationId) || !item.activity?.trim() || !['available', 'unavailable'].includes(item.phoneAccess) || !['required', 'normal', 'optional'].includes(item.adherence ?? '')) throw new Error('日程草稿包含重复时段、非法地点、空活动或无效约束强度')
     slots.add(item.slot)
-    return { slot: item.slot, locationId: item.locationId, activity: item.activity.trim(), phoneAccess: item.phoneAccess }
+    return { slot: item.slot, locationId: item.locationId, activity: item.activity.trim(), phoneAccess: item.phoneAccess, adherence: item.adherence }
   })
   if (slots.size !== 4) throw new Error('基础日程必须完整覆盖四个时段')
   await db.aiTurns.add({

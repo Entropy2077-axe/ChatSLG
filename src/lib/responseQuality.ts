@@ -1,7 +1,7 @@
 import { chatCompletion } from './deepseek'
 import { displayName } from './contact'
-import { activeUpcomingPlansText } from './memory'
-import { describeCurrentWorldSchedule } from './schedule'
+import { activeWorldPlansText } from './memory'
+import { currentWorldSchedule } from './schedule'
 import { formatPersonaProfile, personalityTraitLine } from './prompt'
 import type { AdminAiTraceStage, AiBubble, AppSettings, Contact, GroupAiBubble, GroupEnergyLevel } from '../types'
 
@@ -127,10 +127,10 @@ export async function validatePrivateTurn(opts: {
   trace?: { turnId: string; stage: AdminAiTraceStage; conversationId?: string }
 }): Promise<{ raw: string; repaired: boolean; reason?: string; detectedInvalid?: boolean }> {
   const name = displayName(opts.contact)
-  const now = new Date()
-  const currentSchedule = await describeCurrentWorldSchedule(opts.contact.id)
+  const { world, schedule } = await currentWorldSchedule(opts.contact.id)
+  const currentSchedule = schedule ? `现在在${schedule.activity}` : ''
   const upcomingSchedule = ''
-  const upcomingPlans = activeUpcomingPlansText(opts.contact, now)
+  const upcomingPlans = activeWorldPlansText(opts.contact, world.day, world.slot)
   const activeMood = opts.contact.mood?.text && Date.now() < opts.contact.mood.expiresAt ? opts.contact.mood.text : ''
   const worldbookInfo = opts.worldbookText ? `\nWorldbook (canon world rules — content consistent with these is NOT "invented facts", it is legitimate world-building):\n${opts.worldbookText}` : ''
   const systemPrompt = `You are a strict roleplay response reviewer. Output JSON only: {"valid":true/false,"reason":"short","fixedRaw":"optional"}.

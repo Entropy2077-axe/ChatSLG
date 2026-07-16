@@ -14,6 +14,8 @@ import { recentSocialEventsText } from './socialEvents'
 import { recentSharedOriginalContext } from './sharedRecentContext'
 import type { AppSettings, Contact } from '../types'
 import { adjudicateStateChanges, type StateEvidence } from './stateAdjudicator'
+import { ensureWorldInitialized } from './world'
+import { formatWeatherForModel, weatherForWorld } from './worldWeather'
 
 const ELIGIBLE_WINDOW_MS = 10 * 60 * 1000
 /** Of the friends who *do* react (relationship allows it and the dice roll passed), this fraction also leave a comment instead of just liking. */
@@ -23,6 +25,12 @@ const COMMENT_SHARE = 0.55
 const MOMENT_PHOTO_PROBABILITY = 0.6
 
 const COMMENT_STICKER_PATTERN = /\[sticker:([^[\]]+)\]/i
+
+async function currentWeatherText(): Promise<string> {
+  const world = await ensureWorldInitialized()
+  const map = await db.worldMaps.get('active')
+  return formatWeatherForModel(weatherForWorld(map?.seed ?? world.worldId, world.day, world.slot))
+}
 
 /**
  * AI comments are asked to append a "[sticker:名字]" marker at the end of the
@@ -124,6 +132,7 @@ function buildMomentsPrompt(
   stickerNames: string[],
   contexts: Map<string, string>,
   scheduleTexts: Map<string, string>,
+  weatherText: string,
 ): string {
   const sections = entries
     .map((e, i) => {
@@ -148,7 +157,10 @@ function buildMomentsPrompt(
 
   const worldviewSection = worldviewText ? `【这个世界的设定 所有人的朋友圈内容都要符合这个设定】\n${worldviewText}\n\n` : ''
 
-  return `${worldviewSection}【场景】
+  return `${worldviewSection}【当前季节与天气】
+${weatherText}
+
+【场景】
 你是一个朋友圈内容生成器。下面有几个人准备发朋友圈，请你扮演他们每个人写出符合各自人设的内容。
 人设、特色人格、说话样例、关系和当前心情是角色选择主题、情绪、措辞与互动方式的逻辑前提，不是可忽略的文风装饰。事实不冲突时，必须写出这个角色才会发的内容；不得把不同角色写成泛化的同一种朋友圈，也不得为了表现特殊人格编造不存在的经历。
 这不是私聊——朋友圈是公开广播，不能写成"我跟你说""咱们"这种对着特定人的语气。
@@ -273,12 +285,13 @@ export async function refreshMoments(settings: AppSettings): Promise<RefreshMome
   }))
   const contexts = new Map(contextRows)
   const scheduleTexts = new Map(await Promise.all(involved.map(async (contact) => [contact.id, await describeCurrentWorldSchedule(contact.id)] as const)))
+  const weatherText = await currentWeatherText()
   const raw = await chatCompletion({
     apiKey: settings.apiKey,
     baseUrl: settings.baseUrl,
     model: settings.model,
     messages: [
-      { role: 'system', content: buildMomentsPrompt(entries, isModuleEnabled('worldview') ? await retrieveWorldbookContext(entries.map((e) => `${e.poster.name} ${e.poster.systemPrompt} ${e.poster.memoryFacts}`).join('\n')) : '', stickerNames, contexts, scheduleTexts) },
+      { role: 'system', content: buildMomentsPrompt(entries, isModuleEnabled('worldview') ? await retrieveWorldbookContext(entries.map((e) => `${e.poster.name} ${e.poster.systemPrompt} ${e.poster.memoryFacts}`).join('\n')) : '', stickerNames, contexts, scheduleTexts, weatherText) },
       { role: 'user', content: '请生成' },
     ],
     jsonMode: true,
@@ -395,7 +408,7 @@ function planUserMomentReactors(contacts: Contact[]): UserMomentReactorPlan[] {
   return plans
 }
 
-function buildUserMomentCommentPrompt(content: string, commenters: Contact[], worldviewText: string, stickerNames: string[], contexts: Map<string, string>, scheduleTexts: Map<string, string>): string {
+function buildUserMomentCommentPrompt(content: string, commenters: Contact[], worldviewText: string, stickerNames: string[], contexts: Map<string, string>, scheduleTexts: Map<string, string>, weatherText: string): string {
   const commenterLines = commenters
     .map((c, i) => {
       const scheduleLine = scheduleTexts.get(c.id) ?? ''
@@ -404,7 +417,10 @@ function buildUserMomentCommentPrompt(content: string, commenters: Contact[], wo
     })
     .join('\n')
   const worldviewSection = worldviewText ? `【这个世界的设定】\n${worldviewText}\n\n` : ''
-  return `${worldviewSection}你是一个朋友圈评论生成器 只输出JSON 不要有任何其他文字
+  return `${worldviewSection}【当前季节与天气】
+${weatherText}
+
+你是一个朋友圈评论生成器 只输出JSON 不要有任何其他文字
 
 用户发了一条朋友圈: "${content}"
 
@@ -466,6 +482,7 @@ export async function postUserMoment(content: string, settings: AppSettings): Pr
         return [contact.id, [originalContext, memories, social, events].filter(Boolean).join('\n\n').slice(0, 9_000)] as const
       }))
       const scheduleTexts = new Map(await Promise.all(commenterPlans.map(async ({ contact }) => [contact.id, await describeCurrentWorldSchedule(contact.id)] as const)))
+      const weatherText = await currentWeatherText()
       const raw = await chatCompletion({
         apiKey: settings.apiKey,
         baseUrl: settings.baseUrl,
@@ -480,6 +497,7 @@ export async function postUserMoment(content: string, settings: AppSettings): Pr
               stickerNames,
               new Map(contextRows),
               scheduleTexts,
+              weatherText,
             ),
           },
           { role: 'user', content: '请生成' },

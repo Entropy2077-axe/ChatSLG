@@ -184,16 +184,36 @@ async function initializeWorldStorage(): Promise<void> {
     const leafReplacement = (id: string) => isLeafInTree(id, currentLocations) ? id : leafDescendants(id, currentLocations)[0]?.id
     const playerLeaf = leafReplacement(existing.playerLocationId)
     if (playerLeaf && playerLeaf !== existing.playerLocationId) await db.worldState.update('global', { playerLocationId: playerLeaf, updatedAt: Date.now() })
-    for (const contact of await db.contacts.toArray()) {
+    const contacts = await db.contacts.toArray()
+    for (const contact of contacts) {
       if (!contact.outfit) await db.contacts.update(contact.id, { outfit: defaultOutfit(contact.createdAt) })
       if (!contact.currentLocationId) continue
       const replacement = leafReplacement(contact.currentLocationId)
       if (replacement && replacement !== contact.currentLocationId) await db.contacts.update(contact.id, { currentLocationId: replacement })
     }
-    for (const schedule of await db.characterSchedules.toArray()) {
+    const allSchedules = await db.characterSchedules.toArray()
+    for (const schedule of allSchedules) {
       const replacement = leafReplacement(schedule.locationId)
       if (replacement && replacement !== schedule.locationId) await db.characterSchedules.update(schedule.id, { locationId: replacement })
     }
+    const fallbackLabels: Record<TimeSlot, string> = { morning: '日常起居', day: '日常活动', evening: '自由安排', night: '休息' }
+    const fallbackRows: CharacterSchedule[] = []
+    for (const contact of contacts) {
+      const base = allSchedules.filter((item) => item.characterId === contact.id && item.priority === 'base')
+      if (hasCompleteWeeklySchedule(base)) continue
+      for (const slot of ['morning', 'day', 'evening', 'night'] as TimeSlot[]) {
+        if (base.some((item) => item.slot === slot && item.dayOfWeek === undefined)) continue
+        const template = base.find((item) => item.slot === slot)
+        const locationId = leafReplacement(template?.locationId ?? contact.currentLocationId ?? '') ?? playerLeaf ?? 'home-living'
+        fallbackRows.push({
+          id: uuid(), characterId: contact.id, slot, locationId,
+          activity: template?.activity || fallbackLabels[slot],
+          phoneAccess: template?.phoneAccess ?? 'available', adherence: template?.adherence ?? 'normal',
+          priority: 'base', sourceEventIds: [], createdAt: Date.now(),
+        })
+      }
+    }
+    if (fallbackRows.length) await db.characterSchedules.bulkAdd(fallbackRows)
     for (const appointment of await db.appointments.toArray()) {
       const replacement = leafReplacement(appointment.locationId)
       if (replacement && replacement !== appointment.locationId) await db.appointments.update(appointment.id, { locationId: replacement })
@@ -301,11 +321,28 @@ export function formatLocationTree(locations: LocationNode[]): string {
 
 const PRIORITY: Record<CharacterSchedule['priority'], number> = { base: 1, override: 2, commitment: 3 }
 
+export type ScheduleAdherence = NonNullable<CharacterSchedule['adherence']>
+
+export function effectiveScheduleAdherence(schedule: CharacterSchedule): ScheduleAdherence {
+  if (schedule.priority === 'commitment' || schedule.priority === 'override') return 'required'
+  return schedule.adherence ?? 'normal'
+}
+
 export function resolveSchedule(schedules: CharacterSchedule[], day: number, slot: TimeSlot): CharacterSchedule | undefined {
   const dayOfWeek = (day - 1) % 7
   return schedules
     .filter((item) => item.slot === slot && (item.effectiveDay === day || (item.effectiveDay === undefined && (item.dayOfWeek === undefined || item.dayOfWeek === dayOfWeek))))
-    .sort((a, b) => PRIORITY[b.priority] - PRIORITY[a.priority] || b.createdAt - a.createdAt)[0]
+    .sort((a, b) => PRIORITY[b.priority] - PRIORITY[a.priority]
+      || Number(b.effectiveDay === day) - Number(a.effectiveDay === day)
+      || Number(b.dayOfWeek === dayOfWeek) - Number(a.dayOfWeek === dayOfWeek)
+      || b.createdAt - a.createdAt)[0]
+}
+
+export function hasCompleteWeeklySchedule(schedules: Array<Pick<CharacterSchedule, 'dayOfWeek' | 'slot'>>): boolean {
+  const covered = new Set(schedules.flatMap((item) => Number.isInteger(item.dayOfWeek)
+    ? [`${item.dayOfWeek}:${item.slot}`]
+    : []))
+  return covered.size === 28
 }
 
 export async function schedulesFor(contact: Contact): Promise<CharacterSchedule[]> {

@@ -8,13 +8,12 @@ import { Avatar } from '../components/Avatar'
 import { AvatarPicker } from '../components/AvatarPicker'
 import { ActionSheet } from '../components/ActionSheet'
 import { displayName } from '../lib/contact'
-import { activeUpcomingPlans, activeUpcomingPlansText, resetMemory } from '../lib/memory'
+import { activeWorldPlans, activeWorldPlansText, resetMemory } from '../lib/memory'
 import { cascadeDeleteContactSocialData } from '../lib/moments'
 import { removeContactFromAllGroups } from '../lib/groupChat'
-import { pruneExpiredOverrides, describeCurrentSchedule, describeUpcomingScheduleText } from '../lib/schedule'
 import { normalizeMood } from '../lib/mood'
 import { defaultOutfit, OUTFIT_FIELDS } from '../lib/outfit'
-import { WEEKDAYS, describeCurrentTime } from '../lib/time'
+import { formatWorldDate, modelWorldTimeText } from '../lib/worldCalendar'
 import { RELATIONSHIP_OPTIONS, formatSpeechSamplesForScene, buildRawChatPromptParts, buildJsonConversionPrompt } from '../lib/prompt'
 import { useModuleEnabled, isModuleEnabled } from '../features'
 import { relationshipLine } from '../lib/relationship'
@@ -28,9 +27,10 @@ import { chatCompletion } from '../lib/deepseek'
 import { buildOccupationPrompt, parseOccupation, employmentPatch, OCCUPATION_OPTIONS } from '../lib/career'
 import { formatCurrency } from '../lib/wallet'
 import { setWalletBalance } from '../lib/finance'
-import { slotLabel } from '../lib/world'
+import { resolveSchedule, slotLabel } from '../lib/world'
 import { commitScheduleAdaptation, generateScheduleAdaptation } from '../lib/scheduleAdaptation'
 import { resolveCurrentOutfit, resolveScheduleConstraint } from '../lib/temporaryConstraints'
+import { formatWeatherForModel, weatherForWorld } from '../lib/worldWeather'
 
 function LatestAiTurnJson({ contactId }: { contactId: string }) {
   const latestTurn = useLiveQuery(async () => {
@@ -95,6 +95,7 @@ export function ContactCardPage() {
     [contactId],
   ) ?? []
   const worldState = useLiveQuery(() => db.worldState.get('global'), [])
+  const worldMap = useLiveQuery(() => db.worldMaps.get('active'), [])
   const locations = useLiveQuery(() => db.locations.orderBy('sortOrder').toArray(), []) ?? []
   const worldSchedules = useLiveQuery(
     () => (contactId ? db.characterSchedules.where('characterId').equals(contactId).toArray() : []),
@@ -114,6 +115,13 @@ export function ContactCardPage() {
     },
     [contactId],
   ) ?? []
+  const scheduleDeviations = useLiveQuery(async () => {
+    if (!contactId) return []
+    return (await db.worldEvents.where('type').equals('scheduleDeviation').toArray())
+      .filter((event) => event.actorId === contactId)
+      .sort((a, b) => b.worldStep - a.worldStep)
+      .slice(0, 5)
+  }, [contactId]) ?? []
   const relationLinks = useLiveQuery(
     async () => {
       if (!contactId) return []
@@ -150,7 +158,7 @@ export function ContactCardPage() {
       const raw = await chatCompletion({ apiKey: settings.apiKey, baseUrl: settings.baseUrl, model: settings.utilityModel, messages: [{ role: 'system', content: buildOccupationPrompt(value, contact.systemPrompt) }, { role: 'user', content: '生成职业资料' }], jsonMode: true, purpose: 'persona' })
       const parsed = parseOccupation(raw)
       if (!parsed) throw new Error('职业资料生成失败')
-      await db.contacts.update(contact.id, { ...employmentPatch(value, parsed.monthlySalary), ...(parsed.schedule ? { schedule: parsed.schedule } : {}) })
+      await db.contacts.update(contact.id, employmentPatch(value, parsed.monthlySalary, worldState?.day ?? 1))
     } finally { setAssigningCareer(false) }
   }
   async function adaptSchedule() {
@@ -158,7 +166,7 @@ export function ContactCardPage() {
     setAdaptingSchedule(true)
     try {
       const draft = await generateScheduleAdaptation(contactId, settings)
-      const summary = draft.schedules.map((item) => `${slotLabel(item.slot)}：${locationById.get(item.locationId)?.name || item.locationId} · ${item.activity}`).join('\n')
+      const summary = draft.schedules.map((item) => `${slotLabel(item.slot)}：${locationById.get(item.locationId)?.name || item.locationId} · ${item.activity} · ${item.adherence === 'required' ? '必须遵守' : item.adherence === 'optional' ? '可自由调整' : '需充分理由方可调整'}`).join('\n')
       if (window.confirm(`确认用以下内容替换基础日程？约定和临时调整不会改变。\n\n${summary}`)) await commitScheduleAdaptation(draft)
     } catch (err) {
       window.alert(err instanceof Error ? err.message : String(err))
@@ -217,22 +225,16 @@ export function ContactCardPage() {
     setEditingRemark(false)
   }
 
-  const activePlans = activeUpcomingPlans(contact.upcomingPlans ?? [], new Date())
+  const activePlans = activeWorldPlans(contact.upcomingPlans ?? [], worldState?.day ?? 1, worldState?.slot ?? 'morning')
   const visibleActiveIntents = activeIntents(contact, Date.now(), 10)
   const usedIntents = (contact.intentQueue ?? [])
     .filter((intent) => intent.status === 'used')
     .sort((a, b) => b.createdAt - a.createdAt)
     .slice(0, 5)
   const hasMemory = contact.memoryFacts || contact.memoryStyle || activePlans.length > 0 || structuredMemories.length > 0 || relationLinks.length > 0
-  const schedule = contact.schedule ?? []
-  const activeOverrides = pruneExpiredOverrides(contact.scheduleOverrides ?? [], new Date())
   const locationById = new Map(locations.map((location) => [location.id, location]))
   const currentLocation = contact.currentLocationId ? locationById.get(contact.currentLocationId) : undefined
-  const currentWorldSchedule = worldState
-    ? worldSchedules
-        .filter((item) => item.slot === worldState.slot && (item.effectiveDay === undefined || item.effectiveDay === worldState.day))
-        .sort((a, b) => ({ commitment: 3, override: 2, base: 1 }[b.priority] - { commitment: 3, override: 2, base: 1 }[a.priority]))[0]
-    : undefined
+  const currentWorldSchedule = worldState ? resolveSchedule(worldSchedules, worldState.day, worldState.slot) : undefined
   const currentOutfit = worldState ? resolveCurrentOutfit(contact, outfitConstraints, worldState.day, worldState.slot) : (contact.outfit ?? defaultOutfit(contact.createdAt))
   const currentTemporarySchedule = worldState ? resolveScheduleConstraint(scheduleConstraints, worldState.day, worldState.slot) : undefined
   const upcomingOutfit = outfitConstraints.filter((item) => !worldState || item.startDay > worldState.day).sort((a, b) => a.startDay - b.startDay)[0]
@@ -245,6 +247,9 @@ export function ContactCardPage() {
   // an actual turn, so pendingEvents here is read straight off the live
   // contact instead of going through the "read once then clear" flow.
   const now = new Date()
+  const previewClock = worldState ?? { day: 1, slot: 'morning' as const, hour: 8 }
+  const previewWeather = formatWeatherForModel(weatherForWorld(worldMap?.seed ?? worldState?.worldId ?? 'default-world', previewClock.day, previewClock.slot))
+  const previewPlansText = activeWorldPlansText(contact, previewClock.day, previewClock.slot)
   const pendingEvents = contact.pendingEvents ?? []
   const previewActiveIntents = isModuleEnabled('intent') ? activeIntents(contact, now.getTime()) : []
   // ---- admin-mode prompt preview (two-step pipeline) ----
@@ -264,7 +269,7 @@ export function ContactCardPage() {
           `【你和对方的关系】${relationshipLine(contact.relationshipBase || '朋友', contact.relationshipDynamic || '')}`,
           `【你对TA的了解】${contact.memoryFacts || '（刚开始聊）'}`,
           `【相处习惯】${contact.memoryStyle || '（还没有形成习惯）'}`,
-          `【当前情境】现在: ${describeCurrentTime(now)}。对方: ${buildUserProfileText(settings)}。${contact.mood?.text ? `你的心情: ${contact.mood.text}。` : ''}【日程】${describeCurrentSchedule(contact, now) ? `\n当前: ${describeCurrentSchedule(contact, now)}` : '\n当前: 暂无安排'}${describeUpcomingScheduleText(contact, now) ? `\n接下来:\n${describeUpcomingScheduleText(contact, now)}` : '\n接下来: 暂无安排'}${activeUpcomingPlansText(contact, now) ? `\n约定: ${activeUpcomingPlansText(contact, now)}` : ''}${pendingEvents.length > 0 ? `\n最近: ${pendingEvents.join('；')}` : ''}`,
+          `【当前情境】现在: ${modelWorldTimeText(previewClock)}。季节与天气: ${previewWeather}。对方: ${buildUserProfileText(settings)}。${contact.mood?.text ? `你的心情: ${contact.mood.text}。` : ''}【世界日程】${currentWorldSchedule ? `\n当前: ${currentWorldSchedule.activity}，地点=${currentWorldSchedule.locationId}` : '\n当前: 暂无安排'}${previewPlansText ? `\n约定: ${previewPlansText}` : ''}${pendingEvents.length > 0 ? `\n最近: ${pendingEvents.join('；')}` : ''}`,
         ].filter(Boolean).join('\n\n'),
         activeIntentText: activeIntentPrompt(previewActiveIntents),
         stickerNames: stickers.map((s) => s.name),
@@ -301,7 +306,7 @@ export function ContactCardPage() {
         )}
       </section>
 
-      {lifeSimulationEnabled && <section className="mt-3 bg-white px-4 py-4"><h3 className="mb-2 text-xs font-medium text-gray-400">🌙 生活回顾</h3>{lifeState && <p className="mb-2 text-xs text-gray-500">此刻：{lifeState.location} · {lifeState.activity} · 精力 {lifeState.energy}</p>}{lifeEvents.filter((event) => event.visibility !== 'private').length === 0 ? <p className="text-sm text-gray-400">最近没有适合分享的生活动态</p> : <div className="space-y-2">{lifeEvents.filter((event) => event.visibility !== 'private').slice(0, 10).map((event) => <div key={event.id} className="rounded-lg bg-gray-50 px-3 py-2"><p className="text-sm text-gray-700">{event.summary}</p><p className="mt-0.5 text-[10px] text-gray-400">{new Date(event.occurredAt).toLocaleString()} · {event.type === 'summary' ? '阶段回顾' : '生活事件'}</p></div>)}</div>}</section>}
+      {lifeSimulationEnabled && <section className="mt-3 bg-white px-4 py-4"><h3 className="mb-2 text-xs font-medium text-gray-400">🌙 生活回顾</h3>{lifeState && <p className="mb-2 text-xs text-gray-500">此刻：{lifeState.location} · {lifeState.activity} · 精力 {lifeState.energy}{lifeState.weatherLabel ? ` · ${lifeState.weatherLabel}` : ''}</p>}{lifeEvents.filter((event) => event.visibility !== 'private').length === 0 ? <p className="text-sm text-gray-400">最近没有适合分享的生活动态</p> : <div className="space-y-2">{lifeEvents.filter((event) => event.visibility !== 'private').slice(0, 10).map((event) => <div key={event.id} className="rounded-lg bg-gray-50 px-3 py-2"><p className="text-sm text-gray-700">{event.summary}</p><p className="mt-0.5 text-[10px] text-gray-400">{event.worldDay ? `${formatWorldDate(event.worldDay)}${event.worldSlot ? ` · ${slotLabel(event.worldSlot)}` : ''}` : '旧版生活记录'}{event.weatherLabel ? ` · ${event.weatherLabel}` : ''} · {event.type === 'summary' ? '阶段回顾' : '生活事件'}</p></div>)}</div>}</section>}
 
       <div className="mt-3 bg-white">
         <div className="grid grid-cols-2 gap-x-4 gap-y-2 border-b border-gray-100 px-4 py-3 text-xs text-gray-500"><p>性别：{contact.gender || contact.creatorProfile?.gender || '未填写'}</p><p>真名：{contact.realName || contact.name}</p><p>网名：{contact.nickname || contact.name}</p><p>生日：{contact.birthday || '未填写'}</p></div>
@@ -393,7 +398,7 @@ export function ContactCardPage() {
                 <span className="text-xs text-gray-400">和你的约定 </span>
                 <ul className="mt-1 space-y-0.5">
                   {activePlans.map((p) => (
-                    <li key={p.id}>{p.date ? `[${p.date}] ${p.text}` : p.text}</li>
+                    <li key={p.id}>{p.worldDay ? `[${formatWorldDate(p.worldDay)}${p.worldSlot ? ` · ${slotLabel(p.worldSlot)}` : ''}] ${p.text}` : p.text}</li>
                   ))}
                 </ul>
               </div>
@@ -457,6 +462,8 @@ export function ContactCardPage() {
                       <span className="ml-1 text-[10px] text-gray-400">
                         {item.priority === 'commitment' ? '约定' : item.priority === 'override' ? '临时调整' : '基础日程'}
                         {item.effectiveDay !== undefined ? ` · 第${item.effectiveDay}天` : ''}
+                        {item.effectiveDay === undefined && item.dayOfWeek !== undefined ? ` · 世界周第${item.dayOfWeek + 1}日` : ''}
+                        {` · ${item.priority !== 'base' || item.adherence === 'required' ? '必须遵守' : item.adherence === 'optional' ? '可自由调整' : '需充分理由方可调整'}`}
                         {item.phoneAccess === 'unavailable' ? ' · 不便看手机' : ' · 可看手机'}
                       </span>
                     </p>
@@ -471,8 +478,19 @@ export function ContactCardPage() {
             <h4 className="mb-1 text-xs font-medium text-gray-400">已确认约定</h4>
             {appointments.filter((item) => item.status === 'planned').map((item) => (
               <p key={item.id} className="text-sm text-gray-600">
-                第{item.day}天 {slotLabel(item.slot)} · {locationById.get(item.locationId)?.name || item.locationId} · {item.description}
+                {formatWorldDate(item.day)} · {slotLabel(item.slot)} · {locationById.get(item.locationId)?.name || item.locationId} · {item.description}
               </p>
+            ))}
+          </div>
+        )}
+        {scheduleDeviations.length > 0 && (
+          <div className="mt-3 border-t border-gray-100 pt-3">
+            <h4 className="mb-1 text-xs font-medium text-gray-400">最近日程偏离</h4>
+            {scheduleDeviations.map((event) => (
+              <div key={event.id} className="mb-2 rounded-lg bg-amber-50 px-2.5 py-2 text-xs text-amber-900">
+                <p>{event.plannedLocationId ? `${locationById.get(event.plannedLocationId)?.name || event.plannedLocationId} → ` : ''}{locationById.get(event.actualLocationId ?? event.locationId ?? '')?.name || event.actualLocationId || event.locationId} · {event.deviationReason || event.content}</p>
+                <p className="mt-1 text-[10px] text-amber-700">{event.worldDay ? formatWorldDate(event.worldDay) : `世界步${event.worldStep}`} · {event.worldSlot ? slotLabel(event.worldSlot) : ''} · 裁决影响 {event.deviationImpact ?? '未知'} · 置信度 {Math.round((event.adjudicationConfidence ?? 0) * 100)}%</p>
+              </div>
             ))}
           </div>
         )}
@@ -488,71 +506,13 @@ export function ContactCardPage() {
               <div key={diary.id} className="rounded-lg bg-gray-50 px-3 py-2">
                 <p className="text-sm leading-relaxed text-gray-700">{diary.content}</p>
                 <p className="mt-1 text-[10px] text-gray-400">
-                  第{diary.day}天 {slotLabel(diary.slot)} · {locationById.get(diary.locationId)?.name || diary.locationId} · {diary.activity}
+                  {formatWorldDate(diary.day)} · {slotLabel(diary.slot)} · {locationById.get(diary.locationId)?.name || diary.locationId} · {diary.activity}
                 </p>
               </div>
             ))}
           </div>
         )}
       </section>
-
-      {adminEnabled && (
-      <section className="mt-3 bg-white px-4 py-4">
-        <h3 className="mb-2 text-xs font-medium text-gray-400">旧版日程（调试）</h3>
-        {schedule.length === 0 ? (
-          <p className="text-sm text-gray-400">暂无日程安排</p>
-        ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full text-[11px]">
-              <thead>
-                <tr>
-                  <th className="py-1 pr-1 text-left text-gray-400 font-normal"></th>
-                  {WEEKDAYS.map((label) => (
-                    <th key={label} className="px-0.5 py-1 text-center font-medium text-gray-500">{label}</th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {[
-                  { range: '上午', start: 6, end: 12 },
-                  { range: '下午', start: 12, end: 18 },
-                  { range: '晚上', start: 18, end: 24 },
-                ].map(({ range, start, end }) => (
-                  <tr key={range}>
-                    <td className="py-0.5 pr-1 text-gray-400">{range}</td>
-                    {[0, 1, 2, 3, 4, 5, 6].map((day) => {
-                      const blocks = schedule
-                        .filter((b) => b.dayOfWeek === day && b.startHour < end && b.endHour > start)
-                        .sort((a, b) => a.startHour - b.startHour)
-                      if (blocks.length === 0) return <td key={day} className="px-0.5 py-0.5 text-center text-gray-300">—</td>
-                      const b = blocks[0]
-                      return (
-                        <td key={day} className="px-0.5 py-0.5 text-center">
-                          <span className={b.phoneAccess === 'unavailable' ? 'text-red-400' : 'text-green-500'}>
-                            {b.phoneAccess === 'unavailable' ? '📵' : '📱'}
-                          </span>
-                          <div className="text-[10px] text-gray-600 leading-tight">{b.activity}</div>
-                        </td>
-                      )
-                    })}
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-        {activeOverrides.length > 0 && (
-          <div className="mt-3 border-t border-gray-100 pt-3">
-            <h4 className="mb-1 text-xs font-medium text-gray-400">例外安排</h4>
-            {activeOverrides.map((o) => (
-              <p key={o.id} className="text-sm text-gray-600">
-                [{o.date}] {o.summary}
-              </p>
-            ))}
-          </div>
-        )}
-      </section>
-      )}
 
       {adminEnabled && (
         <section className="mt-3 bg-white px-4 py-4">

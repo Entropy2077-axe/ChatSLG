@@ -121,15 +121,13 @@ async function commitGeneratedContact(job: ContactCreationJob, draft: NonNullabl
       relationshipBase: values.relationship || '朋友',
       relationshipDynamic: '',
       personalityTrait: input.mode === 'nuwa' ? '无' : (values.personalityTrait || '无'),
-      schedule: parsed.schedule,
-      scheduleOverrides: [],
       mbti: parsed.mbti || undefined,
-      currentLocationId: parsed.worldSchedule.find((item) => item.slot === draft.worldSlot)?.locationId || draft.playerLocationId,
-      ...(values.occupation ? employmentPatch(values.occupation, parsed.monthlySalary ?? 6000) : { occupation: '' }),
+      currentLocationId: parsed.worldSchedule.find((item) => item.slot === draft.worldSlot && item.dayOfWeek === (currentWorld.day - 1) % 7)?.locationId || draft.playerLocationId,
+      ...(values.occupation ? employmentPatch(values.occupation, parsed.monthlySalary ?? 6000, currentWorld.day) : { occupation: '' }),
     })
     await db.characterSchedules.bulkAdd(parsed.worldSchedule.map((item) => ({
       id: uuid(), characterId: id, dayOfWeek: item.dayOfWeek, slot: item.slot,
-      locationId: item.locationId, activity: item.activity, phoneAccess: item.phoneAccess,
+      locationId: item.locationId, activity: item.activity, phoneAccess: item.phoneAccess, adherence: item.adherence,
       priority: 'base' as const, sourceEventIds: [], createdAt: now,
     })))
     await db.conversations.add({ id: uuid(), contactId: id, channel: 'private_phone', pinned: false, createdAt: now, updatedAt: now })

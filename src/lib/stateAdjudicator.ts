@@ -92,7 +92,7 @@ function compactStateContext(bundles: LogicContextBundle[], queryText: string): 
   }
   const characterText = bundles.map((bundle) => {
     const state = bundle.subject
-    const scheduleLine = (schedule: typeof state.baseSchedule[number]) => `${schedule.priority}:${schedule.effectiveDay ?? `weekly-${schedule.dayOfWeek ?? '*'}`}/${schedule.slot}@${schedule.locationId} ${schedule.activity} phone=${schedule.phoneAccess}`
+    const scheduleLine = (schedule: typeof state.baseSchedule[number]) => `${schedule.priority}:${schedule.effectiveDay !== undefined ? `world-day-${schedule.effectiveDay}` : schedule.dayOfWeek !== undefined ? `world-cycle-day-${schedule.dayOfWeek + 1}` : 'every-world-day'}/${schedule.slot}@${schedule.locationId} ${schedule.activity} phone=${schedule.phoneAccess}`
     return `characterId=${state.character.id}; name=${state.character.name}; location=${state.currentLocationId}
 outfit=${outfitText(state.character.outfit)}
 base=${state.baseSchedule.filter((item) => item.slot === first.clock.slot).slice(0, 2).map(scheduleLine).join(' | ') || 'none'}

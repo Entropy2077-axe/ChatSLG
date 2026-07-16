@@ -4,11 +4,13 @@ import { retrieveWorldbookTrace } from './worldbook'
 import { ensureWorldInitialized, formatLocationTree } from './world'
 import type {
   Appointment, CharacterSchedule, Contact, ContactMemory, LocationNode,
-  Message, PerceivedEvent, PendingPhoneMessage, WorldbookEntry,
+  Message, PerceivedEvent, PendingPhoneMessage, TimeSlot, WorldbookEntry,
 } from '../types'
 import { outfitText } from './outfit'
 import { activeInRange } from './temporaryConstraints'
 import { recentConversationMessages } from './conversationStats'
+import { modelWorldTimeText } from './worldCalendar'
+import { formatWeatherForModel, weatherForWorld, type WorldWeatherSnapshot } from './worldWeather'
 
 export interface CharacterLogicState {
   character: Contact
@@ -20,7 +22,8 @@ export interface CharacterLogicState {
 
 export interface LogicContextBundle {
   worldVersion: number
-  clock: { day: number; slot: string; hour: number; step: number }
+  clock: { day: number; slot: TimeSlot; hour: number; step: number }
+  weather: WorldWeatherSnapshot
   playerLocationId: string
   locations: LocationNode[]
   locationTreeText: string
@@ -79,9 +82,9 @@ export async function buildLogicContext(opts: {
   query?: string
 }): Promise<LogicContextBundle> {
   const world = await ensureWorldInitialized()
-  const [subject, locations, appointments, pendingMessages] = await Promise.all([
+  const [subject, locations, appointments, pendingMessages, worldMap] = await Promise.all([
     db.contacts.get(opts.subjectId), db.locations.where('worldId').equals(world.worldId).sortBy('sortOrder'),
-    db.appointments.toArray(), db.pendingPhoneMessages.where('status').equals('pending').toArray(),
+    db.appointments.toArray(), db.pendingPhoneMessages.where('status').equals('pending').toArray(), db.worldMaps.get('active'),
   ])
   if (!subject) throw new Error('角色不存在')
   const participantIds = [...new Set((opts.participantIds ?? []).filter((id) => id !== subject.id))]
@@ -107,6 +110,7 @@ export async function buildLogicContext(opts: {
   const perceivedEventText = perceivedEvents.map((item, index) => {
     const event = perceivedWorldEvents[index]
     if (!event) return ''
+    if (event.type === 'seasonal' || event.type === 'weather') return `- [公共环境/${event.id}] ${event.content}`
     return item.perception === 'full'
       ? `- [完整听见/${event.id}] ${event.actorId}: ${event.content}`
       : `- [模糊听见/${event.id}] 你只知道${event.locationId ?? '附近'}有人交谈，听不清具体内容。`
@@ -114,6 +118,7 @@ export async function buildLogicContext(opts: {
   return {
     worldVersion: world.worldVersion,
     clock: { day: world.day, slot: world.slot, hour: world.hour, step: world.step },
+    weather: weatherForWorld(worldMap?.seed ?? world.worldId, world.day, world.slot),
     playerLocationId: world.playerLocationId,
     locations,
     locationTreeText: formatLocationTree(locations),
@@ -132,12 +137,13 @@ export async function buildLogicContext(opts: {
 
 export function formatLogicContext(bundle: LogicContextBundle, opts: { includeLocationTree?: boolean; includePersona?: boolean; maxChars?: number } = {}): string {
   const state = bundle.subject
-  const scheduleLine = (item: CharacterSchedule) => `${item.priority}:${item.dayOfWeek ?? `第${item.effectiveDay}天`}/${item.slot}@${item.locationId} ${item.activity} 手机${item.phoneAccess}`
+  const scheduleLine = (item: CharacterSchedule) => `${item.priority}:${item.effectiveDay !== undefined ? `世界第${item.effectiveDay}天` : item.dayOfWeek !== undefined ? `世界周第${item.dayOfWeek + 1}日` : '世界每日'}/${item.slot}@${item.locationId} ${item.activity} 手机${item.phoneAccess}`
   const treeSection = opts.includeLocationTree === false ? '' : `\n【完整有效地点树——只能引用这些地点ID】\n${bundle.locationTreeText}\n`
   const personaSection = opts.includePersona === false ? '' : `\n【完整稳定人设】\n${personaText(state.character)}\n`
   const mandatory = `【ChatSLG不可违背的世界硬状态】
 世界版本:${bundle.worldVersion}
-当前时间:第${bundle.clock.day}天 ${String(bundle.clock.hour).padStart(2, '0')}:00(${bundle.clock.slot})
+当前时间:${modelWorldTimeText(bundle.clock)}
+当前季节与天气:${formatWeatherForModel(bundle.weather)}
 用户位置:${bundle.playerLocationId}
 你的精确位置:${state.currentLocationId}
 ${treeSection}${personaSection}
@@ -153,6 +159,7 @@ ${state.commitments.map((item) => `commitment:第${item.day}天/${item.slot}@${i
 - 数据库硬状态高于记忆和自然语言。不得声称自己在另一个地点，除非同时输出可验证的结构化地点变更。
 - 日程或约会只能使用上面地点树里的ID；不得创造地点、角色或未经确认的共同经历。
 - commitment高于override，override高于base。普通聊天不能重写base。
+- 季节与天气是代码确定的硬状态。活动、户外环境和衣着应与其相容，但不要为了提天气而提天气，也不能凭天气自动取消明确约定。
 - 不在你的感知和记忆中的信息，你不知道。`
   const maxChars = opts.maxChars ?? MAX_LOGIC_CONTEXT_CHARS
   if (mandatory.length > maxChars) {
@@ -183,10 +190,11 @@ export function formatActionContext(bundle: LogicContextBundle): string {
     .map((location) => `${location.id}=${location.name}`)
     .join('；')
   const scheduleLine = (item: CharacterSchedule) =>
-    `${item.priority}:${item.dayOfWeek ?? `第${item.effectiveDay}天`}/${item.slot}@${item.locationId} ${item.activity} 手机${item.phoneAccess}`
+    `${item.priority}:${item.effectiveDay !== undefined ? `世界第${item.effectiveDay}天` : item.dayOfWeek !== undefined ? `世界周第${item.dayOfWeek + 1}日` : '世界每日'}/${item.slot}@${item.locationId} ${item.activity} 手机${item.phoneAccess}`
   return `【结构动作硬状态】
 characterId=${state.character.id}；角色名=${state.character.name}
 worldVersion=${bundle.worldVersion}；当前第${bundle.clock.day}天/${bundle.clock.slot}；用户位置=${bundle.playerLocationId}；角色位置=${state.currentLocationId}
+季节与天气：${formatWeatherForModel(bundle.weather)}
 合法叶子地点ID：${legalLocations || '无'}
 基础日程：${state.baseSchedule.map(scheduleLine).join('；') || '无'}
 高优先级日程：${state.scheduleOverrides.map(scheduleLine).join('；') || '无'}

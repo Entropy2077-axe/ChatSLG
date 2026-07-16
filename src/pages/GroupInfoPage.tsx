@@ -8,7 +8,7 @@ import { displayName } from '../lib/contact'
 import { activeIntents } from '../lib/intent'
 import { buildUserProfileText } from '../lib/chatEngine'
 import { buildGroupJsonConversionPrompt, buildGroupRawChatPrompt } from '../lib/groupChat'
-import { describeCurrentTime } from '../lib/time'
+import { modelWorldTimeText, stripLegacyRealTimePrefixes } from '../lib/worldCalendar'
 import { isModuleEnabled } from '../features'
 import { useSettingsStore } from '../store/useSettingsStore'
 import { setGroupPlanStatus } from '../lib/groupPlans'
@@ -114,6 +114,7 @@ export function GroupInfoPage() {
   const [selectedToAdd, setSelectedToAdd] = useState<string[]>([])
 
   const group = useLiveQuery(() => (groupId ? db.groups.get(groupId) : undefined), [groupId])
+  const worldState = useLiveQuery(() => db.worldState.get('global'), [])
   const groupPlans = useLiveQuery(() => (groupId ? db.groupPlans.where('groupId').equals(groupId).reverse().sortBy('createdAt') : []), [groupId]) ?? []
   const allContacts = useLiveQuery(() => db.contacts.toArray(), []) ?? EMPTY_CONTACTS
   const membersRaw = useLiveQuery(() => (group ? db.contacts.bulkGet(group.memberContactIds) : []), [group])
@@ -140,11 +141,13 @@ export function GroupInfoPage() {
           allMembers: members,
           speakers: promptPreviewSpeakers,
           stickerNames: stickers.map((s) => s.name),
-          groupMemoryText: group.memory,
+          groupMemoryText: stripLegacyRealTimePrefixes(group.memory ?? ''),
           groupVibeText: group.vibe,
           allowAiChatter: group.allowAiChatter ?? true,
           energyLevel: settings.chatLiveliness === 'quiet' ? 'cold' : settings.chatLiveliness === 'lively' ? 'lively' : 'normal',
-          currentTimeText: describeCurrentTime(new Date()),
+          currentTimeText: modelWorldTimeText(worldState ?? { day: 1, slot: 'morning', hour: 8 }),
+          worldDay: worldState?.day ?? 1,
+          worldSlot: worldState?.slot ?? 'morning',
           userProfileText: buildUserProfileText(settings),
           targetedContextText: '【预览】这里会放入用户本轮@、回复对象等定向上下文。',
           recentEventsText: '【预览】这里会放入最近朋友圈/群聊等社交事件。',
@@ -265,7 +268,7 @@ export function GroupInfoPage() {
 
         <section className="mt-3 bg-white px-4 py-4">
           <h3 className="mb-2 text-xs font-medium text-gray-400">共同计划</h3>
-          {groupPlans.length === 0 ? <p className="text-sm text-gray-400">群聊中形成明确约定后，会自动出现在这里。</p> : <div className="space-y-2">{groupPlans.map((plan: GroupPlan) => <div key={plan.id} className="rounded-lg bg-gray-50 p-3"><p className="text-sm font-medium text-gray-900">{plan.title}</p><p className="mt-1 text-xs text-gray-500">{plan.summary}{plan.location ? ` · ${plan.location}` : ''}</p><p className="mt-1 text-[11px] text-gray-400">{plan.status === 'pending' ? '待确认' : plan.status === 'confirmed' ? '已确认' : plan.status === 'completed' ? '已成行' : '已取消'}</p>{plan.status === 'pending' && <div className="mt-2 flex gap-2"><button type="button" onClick={() => void setGroupPlanStatus(plan, group, 'confirmed', settings)} className="rounded-md bg-gray-900 px-2.5 py-1 text-xs text-white">确认成行</button><button type="button" onClick={() => void setGroupPlanStatus(plan, group, 'cancelled', settings)} className="rounded-md bg-white px-2.5 py-1 text-xs text-gray-500">取消</button></div>}{plan.status === 'confirmed' && <div className="mt-2 flex gap-2"><button type="button" onClick={() => void setGroupPlanStatus(plan, group, 'completed', settings)} className="rounded-md bg-green-600 px-2.5 py-1 text-xs text-white">已成行</button><button type="button" onClick={() => void setGroupPlanStatus(plan, group, 'cancelled', settings)} className="rounded-md bg-white px-2.5 py-1 text-xs text-gray-500">取消</button></div>}</div>)}</div>}
+          {groupPlans.length === 0 ? <p className="text-sm text-gray-400">群聊中形成明确约定后，会自动出现在这里。</p> : <div className="space-y-2">{groupPlans.map((plan: GroupPlan) => <div key={plan.id} className="rounded-lg bg-gray-50 p-3"><p className="text-sm font-medium text-gray-900">{plan.title}</p><p className="mt-1 text-xs text-gray-500">{plan.summary}{plan.worldDay ? ` · 世界第${plan.worldDay}天` : ''}{plan.worldSlot ? ` · ${{ morning: '早晨', day: '白天', evening: '傍晚', night: '夜晚' }[plan.worldSlot]}` : ''}{plan.location ? ` · ${plan.location}` : ''}</p><p className="mt-1 text-[11px] text-gray-400">{plan.status === 'pending' ? '待确认' : plan.status === 'confirmed' ? '已确认' : plan.status === 'completed' ? '已成行' : '已取消'}</p>{plan.status === 'pending' && <div className="mt-2 flex gap-2"><button type="button" onClick={() => void setGroupPlanStatus(plan, group, 'confirmed', settings)} className="rounded-md bg-gray-900 px-2.5 py-1 text-xs text-white">确认成行</button><button type="button" onClick={() => void setGroupPlanStatus(plan, group, 'cancelled', settings)} className="rounded-md bg-white px-2.5 py-1 text-xs text-gray-500">取消</button></div>}{plan.status === 'confirmed' && <div className="mt-2 flex gap-2"><button type="button" onClick={() => void setGroupPlanStatus(plan, group, 'completed', settings)} className="rounded-md bg-green-600 px-2.5 py-1 text-xs text-white">已成行</button><button type="button" onClick={() => void setGroupPlanStatus(plan, group, 'cancelled', settings)} className="rounded-md bg-white px-2.5 py-1 text-xs text-gray-500">取消</button></div>}</div>)}</div>}
         </section>
 
         <section className="mt-3 bg-white px-4 py-4">

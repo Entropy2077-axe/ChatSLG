@@ -1,8 +1,7 @@
 import { db } from '../db/db'
 import { extractJsonObject, parseKnowledgeQueriesField, parseLocationChange, parseOutfitChange } from './aiProtocol'
-import { activeUpcomingPlansText } from './memory'
+import { activeWorldPlansText } from './memory'
 import { customPersonalityTraitsLine, formatPersonaProfile, formatSpeechSamplesForScene, personalityTraitLine } from './prompt'
-import { describeCurrentSchedule } from './schedule'
 import { isModuleEnabled } from '../features'
 import type { Contact, GroupAiBubble, GroupAiResponse, GroupEnergyLevel, GroupSpeakerLimit, LocationChangeProposal, OutfitChangeProposal, ScheduleChangeProposal } from '../types'
 import { dynamicRelationScore } from './contactRelations'
@@ -95,6 +94,8 @@ export function buildGroupSystemPrompt(opts: {
   speakers: Contact[]
   stickerNames: string[]
   currentTimeText: string
+  worldDay: number
+  worldSlot: import('../types').TimeSlot
   userProfileText: string
   targetedContextText?: string
   recentEventsText?: string
@@ -110,8 +111,8 @@ export function buildGroupSystemPrompt(opts: {
     .map((c, i) => {
       const base = c.relationshipBase || '朋友'
       const dynamic = c.relationshipDynamic ? `（${c.relationshipDynamic}）` : ''
-      const plansText = activeUpcomingPlansText(c, new Date())
-      const scheduleText = describeCurrentSchedule(c, new Date())
+      const plansText = activeWorldPlansText(c, opts.worldDay, opts.worldSlot)
+      const scheduleText = ''
       const factsFallback = `（还没有具体的聊天记忆 但是${base}关系 不是陌生人）`
       const styleFallback = `（语气要符合${base}的关系定位 不能生疏客气）`
       const plansLine = plansText ? `\n【和用户的约定】${plansText}` : ''
@@ -194,6 +195,8 @@ export function buildGroupRawChatPrompt(opts: {
   scenePresenceText?: string
   replyCountRule?: string
   currentTimeText: string
+  worldDay: number
+  worldSlot: import('../types').TimeSlot
   userProfileText: string
   targetedContextText?: string
   recentEventsText?: string
@@ -209,7 +212,7 @@ export function buildGroupRawChatPrompt(opts: {
   const speakerBlocks = opts.speakers
     .map((c, i) => {
       const base = c.relationshipBase || '朋友'
-      const plansText = activeUpcomingPlansText(c, new Date())
+      const plansText = activeWorldPlansText(c, opts.worldDay, opts.worldSlot)
       const scheduleText = opts.speakerStateTextMap?.get(c.id) ?? ''
       const samplesText = formatSpeechSamplesForScene(c.speechSamples, 'group', 2)
       const recentMemoText = opts.speakerMemoriesMap?.get(c.id)

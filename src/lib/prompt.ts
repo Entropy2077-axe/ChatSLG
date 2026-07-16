@@ -1,7 +1,6 @@
-import { validateScheduleBlocks } from './schedule'
 import { relationshipLine } from './relationship'
 import type { AvatarCategory } from './avatarCategory'
-import { PERSONALITY_TRAIT_OPTIONS, type CharacterSchedule, type OutfitState, type PersonaProfile, type ScheduleBlock, type TimeSlot } from '../types'
+import { PERSONALITY_TRAIT_OPTIONS, type CharacterSchedule, type OutfitState, type PersonaProfile, type TimeSlot } from '../types'
 import { defaultOutfit } from './outfit'
 
 /**
@@ -348,7 +347,6 @@ export interface PersonaGenerationResult {
   nickname?: string
   birthday?: string
   persona: string
-  schedule: ScheduleBlock[]
   avatarKeyword: string
   personalityTrait: string
   speechSamples?: string[]
@@ -356,7 +354,7 @@ export interface PersonaGenerationResult {
   personaProfile?: PersonaProfile
   monthlySalary?: number
   outfit: OutfitState
-  worldSchedule: Array<Pick<CharacterSchedule, 'dayOfWeek' | 'slot' | 'locationId' | 'activity' | 'phoneAccess'>>
+  worldSchedule: Array<Pick<CharacterSchedule, 'dayOfWeek' | 'slot' | 'locationId' | 'activity' | 'phoneAccess' | 'adherence'>>
 }
 
 export function buildPersonaGenerationPrompt(answers: PersonaAnswers, avatarCategory: AvatarCategory, locationTreeText = ''): string {
@@ -386,7 +384,7 @@ export function buildPersonaGenerationPrompt(answers: PersonaAnswers, avatarCate
 
 【完整有效地点树】
 ${locationTreeText || '当前没有可用地点，日程数组必须为空'}
-地点与日程是强绑定的。schedule里的locationId只能逐字使用上面标记为leaf-enterable的真实ID；container-not-enterable容器绝不能作为日程地点，也不能创造或猜测地点。
+地点与日程是强绑定的。worldSchedule里的locationId只能逐字使用上面标记为leaf-enterable的真实ID；container-not-enterable容器绝不能作为日程地点，也不能创造或猜测地点。
 
 【居住地点判定】
 - 玩家自己的家以home开头。只有关系和人设明确适合与玩家同住（例如家人、伴侣、已确定室友）时，才能把玩家家中的叶子地点作为日常居住地点；普通朋友、同学、同事和陌生人默认不能住在玩家家。
@@ -406,9 +404,9 @@ ${locationTreeText || '当前没有可用地点，日程数组必须为空'}
   "personaProfile": {"facts":["不可改变的身份/背景事实"],"boundaries":["关系边界或禁忌"],"habits":["稳定习惯/口癖"],"behaviorAnchors":["遇到某类情境会如何自然反应"]},
   "monthlySalary": 8000,
   "outfit": {"head":"发型或头饰","top":"上装","bottom":"下装","outerwear":"外套，无则填无","footwear":"鞋袜","accessories":"配饰，无则填无"},
-  "schedule": [
-    { "dayOfWeek": 1, "slot": "morning", "phoneAccess": "unavailable", "locationId": "地点树中的真实ID", "activity": "上班" },
-    { "dayOfWeek": 1, "slot": "night", "phoneAccess": "available", "locationId": "地点树中的真实ID", "activity": "休息" }
+  "worldSchedule": [
+    { "dayOfWeek": 0, "slot": "morning", "phoneAccess": "unavailable", "adherence": "normal", "locationId": "地点树中的真实ID", "activity": "上班" },
+    { "dayOfWeek": 0, "slot": "night", "phoneAccess": "available", "adherence": "optional", "locationId": "地点树中的真实ID", "activity": "休息" }
   ]${avatarInstruction}
 	}
 
@@ -416,12 +414,13 @@ ${locationTreeText || '当前没有可用地点，日程数组必须为空'}
 - name要符合年龄段和性别 可以是真实姓名也可以是网名/昵称 不要用"AI""助手""小美"这种明显是虚构工具人的名字 除非用户明确要求
 - realName、nickname、birthday 均为必填：realName 是自然可信的真名，nickname 是日常网名/昵称；birthday 必须为 YYYY-MM-DD，并根据给出的年龄段换算合理出生年份。用户在补充要求中给出的身份资料优先，只有明确留空时才由你补全。
 - persona里要体现性格倾向和关系定位 但要写得像在描述一个真实存在的普通人 而不是罗列标签
-- persona和schedule必须明确符合所选职业 monthlySalary按现实人民币尺度生成1000到200000之间的整数
+- persona和worldSchedule必须明确符合所选职业 monthlySalary按当前游戏货币尺度生成1000到200000之间的整数
 - outfit六项都必须填写，符合角色年龄、职业和当前生活状态；不要写动作或心理，只写当前实际穿着
 - personaProfile必须忠实提取补充要求中的明确事实，不得遗漏、改写或用推测补充；每个数组0到6条，简短具体
 - speechSamples必须给4到8条，带简短场景标签，展示自然语气；不能写成旁白或解释
 - mbti必须和persona里描述的性格一致 是这个人设最自然对应的MBTI类型
-- schedule覆盖一周中有代表性的四段离散时间。dayOfWeek是0-6；slot只能是morning/day/evening/night；phoneAccess只能是available或unavailable；locationId只能来自完整地点树。一共7到20条即可
+- worldSchedule使用架空世界周循环，必须无重复地完整覆盖7个dayOfWeek × 4个slot，一共正好28条。dayOfWeek是世界连续日推导的0-6循环，不对应现实星期；slot只能是morning/day/evening/night；phoneAccess只能是available或unavailable；locationId只能来自完整地点树
+- 每条基础日程必须给出adherence：required表示角色通常不会自行偏离的硬安排，normal表示需要充分理由才会偏离，optional表示可自由调整的弱安排。不要因为角色懒散就把工作、课程或明确约定标成optional
 - 只输出JSON 不要有markdown代码块标记`
 }
 
@@ -448,7 +447,9 @@ export function parsePersonaGeneration(raw: string): PersonaGenerationResult | n
       // Validate: must be exactly 4 letters from the MBTI dimensions.
       const mbti = /^[IE][SN][TF][JP]$/.test(mbtiRaw) ? mbtiRaw : ''
       const validSlots = new Set<TimeSlot>(['morning', 'day', 'evening', 'night'])
-      const worldSchedule = Array.isArray(parsed.schedule) ? parsed.schedule.flatMap((item: unknown) => {
+      const validAdherence = new Set(['required', 'normal', 'optional'] as const)
+      const rawWorldSchedule = Array.isArray(parsed.worldSchedule) ? parsed.worldSchedule : parsed.schedule
+      const worldSchedule = Array.isArray(rawWorldSchedule) ? rawWorldSchedule.flatMap((item: unknown) => {
         if (!item || typeof item !== 'object') return []
         const value = item as Record<string, unknown>
         const slot = typeof value.slot === 'string' && validSlots.has(value.slot as TimeSlot) ? value.slot as TimeSlot : undefined
@@ -456,8 +457,13 @@ export function parsePersonaGeneration(raw: string): PersonaGenerationResult | n
         const activity = typeof value.activity === 'string' ? value.activity.trim() : ''
         const dayOfWeek = Number(value.dayOfWeek)
         if (!slot || !locationId || !activity || !Number.isInteger(dayOfWeek) || dayOfWeek < 0 || dayOfWeek > 6) return []
-        return [{ dayOfWeek, slot, locationId, activity, phoneAccess: value.phoneAccess === 'unavailable' ? 'unavailable' as const : 'available' as const }]
+        const adherence = typeof value.adherence === 'string' && validAdherence.has(value.adherence as 'required' | 'normal' | 'optional')
+          ? value.adherence as 'required' | 'normal' | 'optional'
+          : 'normal' as const
+        return [{ dayOfWeek, slot, locationId, activity, phoneAccess: value.phoneAccess === 'unavailable' ? 'unavailable' as const : 'available' as const, adherence }]
       }).slice(0, 28) : []
+      const scheduleKeys = new Set(worldSchedule.map((item) => `${item.dayOfWeek}:${item.slot}`))
+      if (worldSchedule.length !== 28 || scheduleKeys.size !== 28) return null
       const outfitRaw = parsed.outfit && typeof parsed.outfit === 'object' ? parsed.outfit as Record<string, unknown> : {}
       const fallbackOutfit = defaultOutfit()
       const outfit: OutfitState = { ...fallbackOutfit, ...Object.fromEntries((['head', 'top', 'bottom', 'outerwear', 'footwear', 'accessories'] as const).map((key) => [key, typeof outfitRaw[key] === 'string' && outfitRaw[key].trim() ? outfitRaw[key].trim().slice(0, 80) : fallbackOutfit[key]])) }
@@ -468,7 +474,6 @@ export function parsePersonaGeneration(raw: string): PersonaGenerationResult | n
         nickname: typeof parsed.nickname === 'string' ? parsed.nickname.trim().slice(0, 40) : undefined,
         birthday: typeof parsed.birthday === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(parsed.birthday.trim()) ? parsed.birthday.trim() : undefined,
         persona: parsed.persona.trim(),
-        schedule: validateScheduleBlocks(parsed.schedule),
         worldSchedule,
         personalityTrait: PERSONALITY_TRAIT_OPTIONS.some((opt) => opt.value === trait) ? trait : '无',
         speechSamples,

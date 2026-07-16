@@ -6,9 +6,9 @@ import { extractJsonObject, parseAiResponse, parseRawPrivateDraft, serializePriv
 import { formatSpeechSamplesForScene, buildRawChatPrompt, buildJsonConversionPrompt, customPersonalityTraitsLine } from './prompt'
 import { retrieveWorldbookTrace } from './worldbook'
 import { isModuleEnabled } from '../features'
-import { CONTEXT_WINDOW_SIZE, activeUpcomingPlansText, maybeUpdateMemory, recentMemoriesText, socialMemoriesText } from './memory'
+import { CONTEXT_WINDOW_SIZE, activeWorldPlansText, maybeUpdateMemory, recentMemoriesText, socialMemoriesText } from './memory'
 import { activeIntentPrompt, activeIntents, markIntentsUsed } from './intent'
-import { describeCurrentTime, ageFromBirthday } from './time'
+import { ageFromBirthday } from './time'
 import { displayName } from './contact'
 import { previewForMessage } from './messagePreview'
 import { recentSocialEventsText } from './socialEvents'
@@ -25,6 +25,7 @@ import { ensureWorldInitialized, resolveSchedule } from './world'
 import type { AiBubble, AppSettings, Contact, Message, MessageType, Sticker } from '../types'
 import { messagesForAiTurn, recentConversationMessages } from './conversationStats'
 import { waitForMessageReveal } from './messagePacing'
+import { modelWorldTimeText } from './worldCalendar'
 
 /**
  * Per-conversation AI-turn state, deliberately kept in a module-level
@@ -362,7 +363,7 @@ async function runAiTurn(
     // ---- Step 1: build context sections (no JSON protocol) ----
     const authoritativeSchedules = [...logicBundle.subject.baseSchedule, ...logicBundle.subject.scheduleOverrides]
     const currentAuthoritativeSchedule = resolveSchedule(authoritativeSchedules, logicBundle.clock.day, logicBundle.clock.slot as import('../types').TimeSlot)
-    const scheduleText = authoritativeSchedules.map((item) => `${item.effectiveDay !== undefined ? `第${item.effectiveDay}天` : `每周${item.dayOfWeek ?? '任意日'}`} ${item.slot}：${item.activity}@${item.locationId}`).join('\n')
+    const scheduleText = authoritativeSchedules.map((item) => `${item.effectiveDay !== undefined ? `世界第${item.effectiveDay}天` : item.dayOfWeek !== undefined ? `世界周第${item.dayOfWeek + 1}日` : '世界每日'} ${item.slot}：${item.activity}@${item.locationId}`).join('\n')
     const recentMemories = await recentMemoriesText(contact.id)
     const financeContext = isModuleEnabled('career')
       ? `\n【经济状况】你的可用余额：${await balanceOf(contact.id)}；对方可用余额：${await balanceOf(USER_WALLET_ID)}。未结清借款：${(await db.loans.filter(l => l.status === 'active' && (l.lenderId === contact.id || l.borrowerId === contact.id)).toArray()).map(l => `${l.borrowerId === contact.id ? '你欠对方' : '对方欠你'}${l.outstanding}`).join('；') || '无'}。所有金钱动作必须量力而行，不得凭空造钱。`
@@ -384,7 +385,8 @@ async function runAiTurn(
     const relationshipText = `【你和对方的关系】${contact.relationshipBase || '朋友'}${contact.relationshipDynamic ? `；当前关系状态：${contact.relationshipDynamic}` : ''}。这是身份事实，不是数值好感。`
     const userMemoryText = `【你对TA的了解】${contact.memoryFacts || '（刚开始聊）'}`
     const habitText = `【相处习惯】${contact.memoryStyle || '（还没有形成习惯）'}`
-    const situationText = `【当前情境】现在: ${describeCurrentTime(new Date())}。对方: ${buildUserProfileText(settings)}。${activeMood ? `你的心情: ${activeMood}。` : ''}【世界日程】${currentAuthoritativeSchedule ? `\n当前: ${currentAuthoritativeSchedule.activity}，地点=${currentAuthoritativeSchedule.locationId}` : '\n当前: 暂无安排'}${scheduleText ? `\n完整有效日程:\n${scheduleText}` : '\n完整有效日程: 暂无'}${activeUpcomingPlansText(contact, new Date()) ? `\n约定: ${activeUpcomingPlansText(contact, new Date())}` : ''}${recentEventsText ? `\n最近: ${recentEventsText}` : ''}`
+    const plansText = activeWorldPlansText(contact, logicBundle.clock.day, logicBundle.clock.slot)
+    const situationText = `【当前情境】现在: ${modelWorldTimeText(logicBundle.clock)}。对方: ${buildUserProfileText(settings)}。${activeMood ? `你的心情: ${activeMood}。` : ''}【世界日程】${currentAuthoritativeSchedule ? `\n当前: ${currentAuthoritativeSchedule.activity}，地点=${currentAuthoritativeSchedule.locationId}` : '\n当前: 暂无安排'}${scheduleText ? `\n完整有效日程:\n${scheduleText}` : '\n完整有效日程: 暂无'}${plansText ? `\n约定: ${plansText}` : ''}${recentEventsText ? `\n最近: ${recentEventsText}` : ''}`
     const contextSections = buildRawChatPrompt({
       name: contact.name,
       persona: `${contact.systemPrompt}${customPersonalityTraitsLine(contact.customPersonalityTraits)}${isModuleEnabled('career') && contact.occupation ? `\n当前职业：${contact.occupation}，现实月薪：${contact.monthlySalary ?? 0}。工作会真实影响你的作息和日常话题。` : ''}${financeContext}`,

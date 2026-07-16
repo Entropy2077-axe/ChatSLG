@@ -2,7 +2,7 @@ import { v4 as uuid } from 'uuid'
 import { db } from '../db/db'
 import { recordSocialEvent } from './socialEvents'
 import { chatCompletion } from './deepseek'
-import type { AppSettings, Group, GroupPlan, GroupPlanStatus, Message } from '../types'
+import type { AppSettings, Group, GroupPlan, GroupPlanStatus, Message, TimeSlot } from '../types'
 
 export async function createGroupPlan(opts: {
   group: Group
@@ -11,7 +11,8 @@ export async function createGroupPlan(opts: {
   title: string
   summary: string
   participantContactIds: string[]
-  scheduledAt?: number
+  worldDay?: number
+  worldSlot?: TimeSlot
   location?: string
 }): Promise<GroupPlan | null> {
   const participants = Array.from(new Set(opts.participantContactIds.filter((id) => opts.group.memberContactIds.includes(id))))
@@ -23,7 +24,7 @@ export async function createGroupPlan(opts: {
   if (duplicate) return duplicate
   const plan: GroupPlan = {
     id: uuid(), groupId: opts.group.id, sourceConversationId: opts.conversationId, sourceMessageId: opts.sourceMessageId,
-    title: opts.title.trim().slice(0, 80), summary: opts.summary.trim().slice(0, 180), scheduledAt: opts.scheduledAt,
+    title: opts.title.trim().slice(0, 80), summary: opts.summary.trim().slice(0, 180), worldDay: opts.worldDay, worldSlot: opts.worldSlot,
     location: opts.location?.trim().slice(0, 80), participantContactIds: participants, status: 'pending', createdAt: Date.now(),
   }
   await db.groupPlans.add(plan)

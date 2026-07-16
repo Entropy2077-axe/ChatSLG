@@ -1,14 +1,13 @@
 import { describe, expect, it } from 'vitest'
-import { lifeWindows } from './lifeSimulation'
+import { lifeEventTypeForActivity } from './lifeSimulation'
 import { rankWorldbookEntries } from './worldbook'
 import { customTraitsValidationError } from './contactCreator'
 
-describe('life simulation windows', () => {
-  it('uses bounded deterministic windows for long gaps', () => {
-    const now = Date.now()
-    const first = lifeWindows(now - 30 * 24 * 60 * 60 * 1000, now)
-    expect(first.length).toBeLessThanOrEqual(30)
-    expect(first).toEqual(lifeWindows(now - 30 * 24 * 60 * 60 * 1000, now))
+describe('world-turn life simulation', () => {
+  it('classifies activities from the authoritative world slot instead of device hours', () => {
+    expect(lifeEventTypeForActivity('在医院值班', 'night')).toBe('work')
+    expect(lifeEventTypeForActivity('和朋友一起吃饭', 'evening')).toBe('social')
+    expect(lifeEventTypeForActivity('回家休息', 'night')).toBe('routine')
   })
 })
 

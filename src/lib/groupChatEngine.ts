@@ -11,10 +11,9 @@ import {
   stripSpeakerNamePrefix,
 } from './groupChat'
 import { extractJsonObject } from './aiProtocol'
-import { CONTEXT_WINDOW_SIZE, activeUpcomingPlansText, maybeUpdateGroupMemory, nonGroupScopedMemoriesText } from './memory'
+import { CONTEXT_WINDOW_SIZE, activeWorldPlansText, maybeUpdateGroupMemory, nonGroupScopedMemoriesText } from './memory'
 import { aiRelationshipPrompt } from './contactRelations'
 import { isModuleEnabled } from '../features'
-import { describeCurrentTime } from './time'
 import { isWorldPhoneAvailable } from './schedule'
 import { displayName } from './contact'
 import { previewForMessage } from './messagePreview'
@@ -28,6 +27,8 @@ import { generateGroupStoryOutline, storyOutlinePromptSection } from './storyOut
 import { buildLogicContext, formatActionContext, formatLogicContext } from './logicContext'
 import { audibilityBetween, ensureWorldInitialized } from './world'
 import { adjudicateStateChanges } from './stateAdjudicator'
+import { modelWorldTimeText, stripLegacyRealTimePrefixes } from './worldCalendar'
+import type { TimeSlot } from '../types'
 import { reviewTurnLogic } from './turnLogicReviewer'
 import type { AppSettings, Contact, Group, GroupAiBubble, Message, Sticker } from '../types'
 import { messagesForAiTurn, recentConversationMessages } from './conversationStats'
@@ -134,10 +135,10 @@ async function updateGroupMemoryAndVibe(opts: {
   turnSummary: string
   groupVibe: string
   logicContextText: string
+  clock: { day: number; slot: TimeSlot; hour: number }
 }): Promise<void> {
   const { group, aiTurnId, settings } = opts
-  const now = Date.now()
-  const timeLabel = new Date(now).toLocaleString()
+  const timeLabel = modelWorldTimeText(opts.clock).split('；')[0]
   const turnSummary = opts.turnSummary.trim()
   const nextTurnCount = (group.memoryTurnCount ?? 0) + 1
   const appendedMemory = turnSummary
@@ -441,13 +442,15 @@ async function runGroupAiTurn(
       allMembers: members,
       speakers,
       stickerNames: stickers.map((s) => s.name),
-      groupMemoryText: group.memory,
+      groupMemoryText: stripLegacyRealTimePrefixes(group.memory ?? ''),
       groupVibeText: group.vibe,
       allowAiChatter: group.allowAiChatter ?? true,
       energyLevel: globalGroupEnergy(settings),
       scenePresenceText,
       replyCountRule: chatLivelinessRule(settings.chatLiveliness),
-      currentTimeText: describeCurrentTime(new Date()),
+      currentTimeText: modelWorldTimeText(logicBundles[0].clock),
+      worldDay: logicBundles[0].clock.day,
+      worldSlot: logicBundles[0].clock.slot,
       userProfileText: buildUserProfileText(settings),
       targetedContextText: targetContext,
       recentEventsText: recentEventsText || undefined,
@@ -470,15 +473,15 @@ async function runGroupAiTurn(
 记忆: ${speaker.memoryFacts || '暂无'}
 相处习惯: ${speaker.memoryStyle || '暂无'}
 当前状态: ${speakerStateTextMap.get(speaker.id) || '没有特别安排'}
-约定: ${activeUpcomingPlansText(speaker, new Date()) || '无'}${recentMemo ? `\n最近记忆碎片:\n${recentMemo}` : ''}`
+约定: ${activeWorldPlansText(speaker, logicBundles[0].clock.day, logicBundles[0].clock.slot) || '无'}${recentMemo ? `\n最近记忆碎片:\n${recentMemo}` : ''}`
         })
         .join('\n\n')
       const premiseText = [
         `【群名】${group.name}`,
         `【群成员】\n${members.map((m) => `- ${displayName(m)}`).join('\n')}`,
-        group.memory ? `【群聊记忆】\n${group.memory}` : '',
+        group.memory ? `【群聊记忆】\n${stripLegacyRealTimePrefixes(group.memory)}` : '',
         group.vibe ? `【群聊氛围】\n${group.vibe}` : '',
-        `【当前时间】${describeCurrentTime(new Date())}`,
+        `【当前时间】${modelWorldTimeText(logicBundles[0].clock)}`,
         `【用户资料】${buildUserProfileText(settings)}`,
         targetContext ? `【本轮定向上下文】\n${targetContext}` : '',
         recentEventsText ? `【最近发生的事】\n${recentEventsText}` : '',
@@ -635,7 +638,7 @@ async function runGroupAiTurn(
     // Authoritative appointments require a legal locationId, worldVersion,
     // explicit participant consent and source events; a natural-language
     // candidate alone cannot mutate the world.
-    void updateGroupMemoryAndVibe({ group, aiTurnId, settings, turnSummary, groupVibe, logicContextText })
+    void updateGroupMemoryAndVibe({ group, aiTurnId, settings, turnSummary, groupVibe, logicContextText, clock: logicBundles[0].clock })
     await revealGroupBubbles(conversationId, group, members, speakers, bubbles, streamId, settings, aiTurnId, turnSummary, logicContextText, logicBundles[0].worldVersion, assistantEvidenceIds, latestUserMessage, controller.signal, turnStartedAt)
   } catch (err) {
     if (streamByConversation.get(conversationId) !== streamId) return

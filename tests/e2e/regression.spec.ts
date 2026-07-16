@@ -498,7 +498,7 @@ test('mind-reading settings expose a gated style submenu with four previews', as
   await expect(page.getByRole('button', { name: '查看想法', exact: true })).toHaveCount(1)
 })
 
-test('life simulation catches up local state after elapsed time without an API key', async ({ page }) => {
+test('life simulation settles validated world-step diaries without an API key or device-time catch-up', async ({ page }) => {
   await page.goto('/#/')
   const result = await page.evaluate(async () => {
     const { db } = await import('/src/db/db.ts')
@@ -508,9 +508,13 @@ test('life simulation catches up local state after elapsed time without an API k
     const settings = useSettingsStore.getState()
     settings.setSettings({ apiKey: '' })
     await new Promise((resolve) => setTimeout(resolve, 30))
+    const { ensureWorldInitialized } = await import('/src/lib/world.ts')
+    await ensureWorldInitialized()
     await db.contacts.add({ id: 'life-contact', name: 'Life Test', avatar: '🙂', avatarColor: '#eee', systemPrompt: '测试角色', occupation: '设计师', createdAt: 1, memoryFacts: '', memoryStyle: '', memoryUpdatedAt: 0, memoryMessageCursor: 0, relationshipBase: '朋友', relationshipDynamic: '' })
     await db.conversations.add({ id: 'life-conversation', contactId: 'life-contact', pinned: false, createdAt: 1, updatedAt: 1 })
-    await db.simulationState.put({ id: 'global', lastSimulatedAt: Date.now() - 36 * 60 * 60 * 1000, seed: 'regression-life', version: 1 })
+    await db.characterDiaries.add({ id: 'life-diary', characterId: 'life-contact', worldStep: 1, day: 1, slot: 'day', locationId: 'home-living', activity: '设计工作', content: '完成了本时段的设计任务。', sourceEventIds: [], createdAt: 1 })
+    await db.worldState.update('global', { day: 1, slot: 'day', hour: 12, step: 1 })
+    await db.simulationState.put({ id: 'global', lastSimulatedAt: Date.now() - 36 * 60 * 60 * 1000, lastWorldStep: 0, seed: 'regression-life', version: 1 })
     await runLifeSimulation(useSettingsStore.getState())
     return { events: await db.lifeEvents.count(), states: await db.contactLifeStates.count() }
   })
@@ -591,7 +595,7 @@ test('queued contact creation replaces the creator history entry', async ({ page
     await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ choices: [{ message: { content: JSON.stringify({
       name: '历史测试角色', persona: '用于验证创建页不会残留在返回历史中的测试角色。', mbti: 'ISTJ', avatarKeyword: '',
       outfit: { head: '短发', top: '衬衫', bottom: '长裤', outerwear: '无', footwear: '运动鞋', accessories: '无' },
-      schedule: [{ dayOfWeek: 1, slot: 'morning', phoneAccess: 'available', locationId: 'home-living', activity: '休息' }],
+      schedule: Array.from({ length: 7 }, (_, dayOfWeek) => ['morning', 'day', 'evening', 'night'].map((slot) => ({ dayOfWeek, slot, phoneAccess: 'available', adherence: slot === 'night' ? 'optional' : 'normal', locationId: 'home-living', activity: slot === 'night' ? '休息' : '日常活动' }))).flat(),
     }) } }] }) })
   })
   await page.goto('/#/phone')
@@ -621,7 +625,7 @@ test('contact creation queue keeps running off-page and automatically saves the 
     const content = requestCount === 1 ? 'not-json' : JSON.stringify({
       name: '队列角色', persona: '一个用于验证后台任务队列的可靠角色。', mbti: 'ISTJ', avatarKeyword: '',
       outfit: { head: '短发', top: '衬衫', bottom: '长裤', outerwear: '无', footwear: '运动鞋', accessories: '无' },
-      schedule: [{ dayOfWeek: 1, slot: 'morning', phoneAccess: 'available', locationId: 'home-living', activity: '休息' }],
+      schedule: Array.from({ length: 7 }, (_, dayOfWeek) => ['morning', 'day', 'evening', 'night'].map((slot) => ({ dayOfWeek, slot, phoneAccess: 'available', adherence: slot === 'night' ? 'optional' : 'normal', locationId: 'home-living', activity: slot === 'night' ? '休息' : '日常活动' }))).flat(),
     })
     await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ choices: [{ message: { content } }] }) })
     activeRequests -= 1

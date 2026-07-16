@@ -2,11 +2,12 @@ import { v4 as uuid } from 'uuid'
 import { db } from '../db/db'
 import { chatCompletion } from './deepseek'
 import { displayName } from './contact'
-import { describeCurrentTime, toDateKey } from './time'
 import { isModuleEnabled } from '../features'
 import { parseIntentsField, type ParsedIntent } from './intent'
 import { applyInterpersonalMemorySignals, uniqueRelationPairs } from './contactRelations'
-import type { AppSettings, Contact, ContactMemory, ContactMemoryScope, ContactRelationLabel, IntentItem, MemoryCategory, MemoryKind, Message, PlanItem } from '../types'
+import type { AppSettings, Contact, ContactMemory, ContactMemoryScope, ContactRelationLabel, IntentItem, MemoryCategory, MemoryKind, Message, PlanItem, TimeSlot } from '../types'
+import { ensureWorldInitialized, slotLabel } from './world'
+import { formatWorldDate, hasWorldMomentPassed, modelWorldTimeText } from './worldCalendar'
 
 /** How many *new* messages accumulate before we bother refreshing memory. Keeps the extra API call rare. */
 export const MEMORY_UPDATE_INTERVAL = 10
@@ -23,19 +24,8 @@ const RELATIONSHIP_CONFIDENCE_THRESHOLD = 80
 const memoryUpdateLocks = new Map<string, Promise<MemoryUpdateDebug | null>>()
 const groupMemoryUpdateLocks = new Map<string, Promise<void>>()
 
-export function activeUpcomingPlans(plans: PlanItem[], now: Date): PlanItem[] {
-  const todayKey = toDateKey(now)
-  return plans.filter((p) => !p.date || p.date >= todayKey)
-}
-
-export function activeUpcomingPlansText(contact: Pick<Contact, 'upcomingPlans'>, now: Date): string {
-  const active = activeUpcomingPlans(contact.upcomingPlans ?? [], now)
-  if (active.length === 0) return ''
-  return active.map((p) => (p.date ? `- [${p.date}] ${p.text}` : `- ${p.text}`)).join('\n')
-}
-
 function plansPromptFragment(): string {
-  return `- plans: 这批记录里新出现的约定/安排(不是正式委托 是随口聊到的 比如"周三一起吃饭") 不要重复"已知约定"里已有的 能推算出日期就填date(YYYY-MM-DD) 算不出来留空 没有新约定就返回空数组`
+  return `- plans: 这批记录里新出现的约定/安排(不是正式委托 是随口聊到的 比如"明天傍晚一起吃饭") 不要重复"已知约定"里已有的；能根据架空历推算就填worldDay正整数，能判断时段就填worldSlot(morning/day/evening/night)，算不出来就省略对应字段；绝对不要输出现实年月日或设备钟点；没有新约定就返回空数组`
 }
 
 // ---- 1:1 memory update ----
@@ -45,6 +35,7 @@ function buildMemoryUpdatePrompt(opts: {
   existingStyle: string
   existingPlansText: string
   currentTimeText: string
+  worldDay: number
 }): string {
   return `你是对话记忆整理器 输出JSON 不要有其他任何文字
 
@@ -58,7 +49,7 @@ ${opts.existingStyle || '（暂无）'}
 【已知约定】
 ${opts.existingPlansText || '（暂无）'}
 接下来是一批新的聊天记录（"对方"是用户 "你"是角色扮演AI） 请更新记忆和关系事实 输出:
-{"facts":"...", "factConfidence":80, "style":"...", "styleConfidence":75, "plans":[{"text":"...", "date":"YYYY-MM-DD或空字符串", "confidence":80}], "relationshipAssessment":"...", "relationshipConfidence":70, "intents":[{"text":"下次想问问他昨晚睡得怎么样","kind":"care","confidence":85}], "memoryItems":[{"category":"基础信息","kind":"user_fact","content":"用户说他养了一只叫小橘的橘猫","tags":["宠物","猫"],"importance":0.7,"emotionalWeight":0.3,"confidence":0.9}]}
+{"facts":"...", "factConfidence":80, "style":"...", "styleConfidence":75, "plans":[{"text":"明天傍晚一起吃饭", "worldDay":${opts.worldDay + 1}, "worldSlot":"evening", "confidence":80}], "relationshipAssessment":"...", "relationshipConfidence":70, "intents":[{"text":"下次想问问他昨晚睡得怎么样","kind":"care","confidence":85}], "memoryItems":[{"category":"基础信息","kind":"user_fact","content":"用户说他养了一只叫小橘的橘猫","tags":["宠物","猫"],"importance":0.7,"emotionalWeight":0.3,"confidence":0.9}]}
 
 要求:
 - facts: 关于对方的客观信息(名字/年龄/喜好/重要事件等) 只记聊天里明确提到的 ≤200字 分号分隔 新旧冲突以新为准
@@ -101,6 +92,8 @@ function formatMessagesForMemory(messages: Message[]): string {
 interface ParsedPlan {
   text: string
   date?: string
+  worldDay?: number
+  worldSlot?: TimeSlot
   confidence: number
 }
 
@@ -113,11 +106,16 @@ function parsePlansField(raw: unknown, requireConfidence = false): ParsedPlan[] 
     if (!text) continue
     const rawDate = (p as { date?: unknown }).date
     const date = typeof rawDate === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(rawDate) ? rawDate : undefined
+    const rawWorldDay = (p as { worldDay?: unknown }).worldDay
+    const parsedWorldDay = typeof rawWorldDay === 'number' ? rawWorldDay : Number(rawWorldDay)
+    const worldDay = Number.isInteger(parsedWorldDay) && parsedWorldDay > 0 ? parsedWorldDay : undefined
+    const rawWorldSlot = (p as { worldSlot?: unknown }).worldSlot
+    const worldSlot = ['morning', 'day', 'evening', 'night'].includes(String(rawWorldSlot)) ? rawWorldSlot as TimeSlot : undefined
     const confidenceRaw = (p as { confidence?: unknown }).confidence
     const confidence = typeof confidenceRaw === 'number' ? confidenceRaw : Number(confidenceRaw)
     if (requireConfidence && (!Number.isFinite(confidence) || confidence < MEMORY_CONFIDENCE_THRESHOLD)) continue
     const normalizedConfidence = Number.isFinite(confidence) ? Math.max(0, Math.min(100, Math.round(confidence))) : 100
-    result.push({ text: text.slice(0, 200), date, confidence: normalizedConfidence })
+    result.push({ text: text.slice(0, 200), date, worldDay, worldSlot, confidence: normalizedConfidence })
     if (result.length >= MAX_UPCOMING_PLANS) break
   }
   return result
@@ -144,6 +142,20 @@ interface ParsedMemoryItem {
   relatedContactNames?: string[]
   relatedContactIds?: string[]
   groupId?: string
+}
+
+/** Model-facing plans use only fictional world days. Legacy real-calendar plans
+ * stay in old saves for compatibility but are deliberately hidden from AI. */
+export function activeWorldPlans(plans: PlanItem[], worldDay: number, worldSlot: TimeSlot = 'morning'): PlanItem[] {
+  return plans.filter((plan) => plan.worldDay !== undefined
+    ? !hasWorldMomentPassed({ day: worldDay, slot: worldSlot }, { day: plan.worldDay, slot: plan.worldSlot })
+    : !plan.date)
+}
+
+export function activeWorldPlansText(contact: Pick<Contact, 'upcomingPlans'>, worldDay: number, worldSlot: TimeSlot = 'morning'): string {
+  const active = activeWorldPlans(contact.upcomingPlans ?? [], worldDay, worldSlot)
+  if (active.length === 0) return ''
+  return active.map((plan) => plan.worldDay ? `- [${formatWorldDate(plan.worldDay)}${plan.worldSlot ? ` · ${slotLabel(plan.worldSlot)}` : ''}] ${plan.text}` : `- ${plan.text}`).join('\n')
 }
 
 const VALID_MEMORY_SCOPES: Set<string> = new Set(['private', 'group', 'interpersonal'])
@@ -419,18 +431,18 @@ async function mergeMemoryItems(
   return stats
 }
 
-function mergePlans(existing: PlanItem[], newOnes: ParsedPlan[], now: number): PlanItem[] {
-  const active = activeUpcomingPlans(existing, new Date(now))
-  const added: PlanItem[] = newOnes.map((p) => ({ id: uuid(), text: p.text, date: p.date, createdAt: now, confidence: p.confidence }))
+function mergePlans(existing: PlanItem[], newOnes: ParsedPlan[], now: number, worldDay: number, worldSlot: TimeSlot): PlanItem[] {
+  const active = activeWorldPlans(existing, worldDay, worldSlot)
+  const added: PlanItem[] = newOnes.map((p) => ({ id: uuid(), text: p.text, worldDay: p.worldDay, worldSlot: p.worldSlot, createdAt: now, confidence: p.confidence }))
   return [...active, ...added].slice(-MAX_UPCOMING_PLANS)
 }
 
 function newPlanItems(newOnes: ParsedPlan[], now: number): PlanItem[] {
-  return newOnes.map((p) => ({ id: uuid(), text: p.text, date: p.date, createdAt: now, confidence: p.confidence }))
+  return newOnes.map((p) => ({ id: uuid(), text: p.text, worldDay: p.worldDay, worldSlot: p.worldSlot, createdAt: now, confidence: p.confidence }))
 }
 
-function mergePlanItems(existing: PlanItem[], added: PlanItem[], now: number): PlanItem[] {
-  return [...activeUpcomingPlans(existing, new Date(now)), ...added].slice(-MAX_UPCOMING_PLANS)
+function mergePlanItems(existing: PlanItem[], added: PlanItem[], worldDay: number, worldSlot: TimeSlot): PlanItem[] {
+  return [...activeWorldPlans(existing, worldDay, worldSlot), ...added].slice(-MAX_UPCOMING_PLANS)
 }
 
 function mergeIntentItems(existing: IntentItem[], added: IntentItem[], now: number): IntentItem[] {
@@ -488,6 +500,7 @@ async function updateMemory(
   try {
     const contact = await db.contacts.get(contactId)
     if (!contact) return null
+    const world = await ensureWorldInitialized()
 
     const allMessages = await db.messages.where('conversationId').equals(conversationId).sortBy('createdAt')
     const cursor = Math.max(0, Math.min(contact.memoryMessageCursor ?? 0, allMessages.length))
@@ -504,8 +517,9 @@ async function updateMemory(
           content: `${logicContextText ? `【不可裁剪的ChatSLG逻辑上下文】\n${logicContextText}\n\n` : ''}${buildMemoryUpdatePrompt({
             existingFacts: contact.memoryFacts,
             existingStyle: contact.memoryStyle,
-            existingPlansText: activeUpcomingPlansText(contact, new Date()),
-            currentTimeText: describeCurrentTime(new Date()),
+            existingPlansText: activeWorldPlansText(contact, world.day, world.slot),
+            currentTimeText: modelWorldTimeText(world),
+            worldDay: world.day,
           })}`,
         },
         { role: 'user', content: formatMessagesForMemory(newMessages) },
@@ -553,7 +567,7 @@ async function updateMemory(
       memoryStyle: styleUpdated ? updated.style : contact.memoryStyle,
       memoryUpdatedAt: now,
       memoryMessageCursor: allMessages.length,
-      upcomingPlans: mergePlanItems(contact.upcomingPlans ?? [], allAddedPlans, now),
+      upcomingPlans: mergePlanItems(contact.upcomingPlans ?? [], allAddedPlans, world.day, world.slot),
       ...(intentEnabled
         ? { intentQueue: mergeIntentItems(contact.intentQueue ?? [], addedIntents, now) }
         : {}),
@@ -772,6 +786,8 @@ function buildGroupMemoryUpdatePrompt(opts: {
   currentTimeText: string
   speakers: Contact[]
   allMembers: Contact[]
+  worldDay: number
+  worldSlot: TimeSlot
 }): string {
   const allMemberNames = opts.allMembers.map((c) => c.name).join('、')
   const speakerBlocks = opts.speakers
@@ -779,7 +795,7 @@ function buildGroupMemoryUpdatePrompt(opts: {
       (c, i) => `发言人${i + 1}: ${c.name}
 已知信息: ${c.memoryFacts || '（暂无）'}
 相处状态: ${c.memoryStyle || '（暂无）'}
-已知约定: ${activeUpcomingPlansText(c, new Date()) || '（暂无）'}`,
+已知约定: ${activeWorldPlansText(c, opts.worldDay, opts.worldSlot) || '（暂无）'}`,
     )
     .join('\n\n')
 
@@ -798,7 +814,7 @@ ${opts.transcript}
 ${speakerBlocks}
 
 输出:
-{"updates":[{"facts":"...","style":"...","plans":[{"text":"...","date":"YYYY-MM-DD或空字符串"}],"memoryItems":[{"category":"基础信息","kind":"user_fact","content":"...","tags":[],"importance":0.7,"emotionalWeight":0.3,"confidence":0.9}],"groupMemoryItems":[{"category":"话题历史","kind":"general","content":"...","tags":[],"importance":0.6,"emotionalWeight":0.2,"confidence":0.8}],"interpersonalMemoryItems":[{"category":"重要事件","kind":"relationship_event","content":"...","relatedContactNames":["雪乃"],"tags":[],"importance":0.7,"emotionalWeight":0.4,"confidence":0.85}]}]}
+{"updates":[{"facts":"...","style":"...","plans":[{"text":"明天傍晚一起吃饭","worldDay":${opts.worldDay + 1},"worldSlot":"evening"}],"memoryItems":[{"category":"基础信息","kind":"user_fact","content":"...","tags":[],"importance":0.7,"emotionalWeight":0.3,"confidence":0.9}],"groupMemoryItems":[{"category":"话题历史","kind":"general","content":"...","tags":[],"importance":0.6,"emotionalWeight":0.2,"confidence":0.8}],"interpersonalMemoryItems":[{"category":"重要事件","kind":"relationship_event","content":"...","relatedContactNames":["雪乃"],"tags":[],"importance":0.7,"emotionalWeight":0.4,"confidence":0.85}]}]}
 
 要求:
 - updates数组顺序和上面发言人顺序一致 数量一致
@@ -885,6 +901,7 @@ async function updateGroupMemory(
   try {
     const group = await db.groups.get(groupId)
     if (!group) return
+    const world = await ensureWorldInitialized()
 
     const allMessages = await db.messages.where('conversationId').equals(conversationId).sortBy('createdAt')
     const cursor = Math.max(0, Math.min(group.memoryMessageCursor ?? 0, allMessages.length))
@@ -928,9 +945,11 @@ async function updateGroupMemory(
           content: `${logicContextText ? `【不可裁剪的ChatSLG逻辑上下文】\n${logicContextText}\n\n` : ''}${buildGroupMemoryUpdatePrompt({
             groupName: group.name,
             transcript: formatGroupMessagesForMemory(newMessages, memberById, settings.userNickname),
-            currentTimeText: describeCurrentTime(new Date()),
+            currentTimeText: modelWorldTimeText(world),
             speakers: targets,
             allMembers: members,
+            worldDay: world.day,
+            worldSlot: world.slot,
           })}`,
         },
         { role: 'user', content: '请生成' },
@@ -970,13 +989,13 @@ async function updateGroupMemory(
         .filter((item) => item.kind === 'character_promise')
         .map((item) => ({
           text: item.content,
-          date: undefined,
+          worldDay: undefined,
           confidence: Math.round(item.confidence * 100),
         }))
 
       const sharedPatch = {
         memoryUpdatedAt: now,
-        upcomingPlans: mergePlans(contact.upcomingPlans ?? [], [...update.plans, ...promisePlans], now),
+        upcomingPlans: mergePlans(contact.upcomingPlans ?? [], [...update.plans, ...promisePlans], now, world.day, world.slot),
       }
       await db.contacts.update(contact.id, directParticipantIds.has(contact.id)
         ? { ...sharedPatch, memoryFacts: update.facts, memoryStyle: update.style }

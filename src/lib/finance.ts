@@ -4,12 +4,20 @@ import { useSettingsStore } from '../store/useSettingsStore'
 import type { WalletOwnerId, WalletTransactionKind } from '../types'
 
 export const USER_WALLET_ID = 'user'
-export function localDateKey(date = new Date()): string {
-  const y = date.getFullYear(), m = String(date.getMonth() + 1).padStart(2, '0'), d = String(date.getDate()).padStart(2, '0')
-  return `${y}-${m}-${d}`
+
+export function salaryForWorldDays(monthlySalary: number, elapsedWorldDays: number): number {
+  return Math.max(0, Math.round(Math.max(0, monthlySalary) / 30 * Math.max(0, Math.floor(elapsedWorldDays))))
 }
-function dayNumber(key: string): number { return Math.floor(new Date(`${key}T12:00:00`).getTime() / 86400000) }
-export function elapsedLocalDays(from: string, to: string): number { return Math.max(0, dayNumber(to) - dayNumber(from)) }
+
+/** Pays the difference between two cumulative world-day salary totals so
+ * rounding is stable whether days are settled one-by-one or in a catch-up. */
+export function salaryForWorldRange(monthlySalary: number, jobStartedWorldDay: number, fromWorldDay: number, toWorldDay: number): number {
+  const salary = Math.max(0, monthlySalary)
+  const start = Math.max(1, Math.floor(jobStartedWorldDay))
+  const from = Math.max(start, Math.floor(fromWorldDay))
+  const to = Math.max(from, Math.floor(toWorldDay))
+  return Math.max(0, Math.round(salary * (to - start) / 30) - Math.round(salary * (from - start) / 30))
+}
 
 export async function ensureWallets(): Promise<void> {
   const settings = useSettingsStore.getState()
@@ -78,22 +86,29 @@ export async function claimRedPacket(transactionId: string, to: WalletOwnerId) {
   })
 }
 
-export async function settleSalaries(): Promise<void> {
+export async function settleSalaries(worldDay: number): Promise<void> {
   const settings = useSettingsStore.getState()
   await ensureWallets()
-  const today = localDateKey()
-  if (settings.userOccupation && settings.userMonthlySalary > 0 && settings.userLastSalaryDate) {
-    const days = elapsedLocalDays(settings.userLastSalaryDate, today)
-    if (days) {
-      await transferFunds({ to: USER_WALLET_ID, amount: Math.round(settings.userMonthlySalary / 30 * days), kind: 'salary', note: `${settings.userOccupation}工资`, idempotencyKey: `salary:user:${today}` })
-      settings.setSettings({ userLastSalaryDate: today })
+  const currentDay = Math.max(1, Math.floor(worldDay))
+  if (settings.userOccupation && settings.userMonthlySalary > 0) {
+    if (settings.userLastSalaryWorldDay === undefined) {
+      settings.setSettings({ userJobStartedWorldDay: settings.userJobStartedWorldDay ?? currentDay, userLastSalaryWorldDay: currentDay })
+    } else {
+      const days = Math.max(0, currentDay - settings.userLastSalaryWorldDay)
+      const amount = salaryForWorldRange(settings.userMonthlySalary, settings.userJobStartedWorldDay ?? settings.userLastSalaryWorldDay, settings.userLastSalaryWorldDay, currentDay)
+      if (amount > 0) await transferFunds({ to: USER_WALLET_ID, amount, kind: 'salary', note: `${settings.userOccupation}·世界第${currentDay}日工资`, idempotencyKey: `salary:user:world-day:${currentDay}` })
+      if (days > 0) settings.setSettings({ userLastSalaryWorldDay: currentDay })
     }
   }
   for (const c of await db.contacts.toArray()) {
-    if (!c.occupation || !c.monthlySalary || !c.lastSalaryDate) continue
-    const days = elapsedLocalDays(c.lastSalaryDate, today)
-    if (!days) continue
-    await transferFunds({ to: c.id, amount: Math.round(c.monthlySalary / 30 * days), kind: 'salary', note: `${c.occupation}工资`, idempotencyKey: `salary:${c.id}:${today}` })
-    await db.contacts.update(c.id, { lastSalaryDate: today })
+    if (!c.occupation || !c.monthlySalary) continue
+    if (c.lastSalaryWorldDay === undefined) {
+      await db.contacts.update(c.id, { jobStartedWorldDay: c.jobStartedWorldDay ?? currentDay, lastSalaryWorldDay: currentDay })
+      continue
+    }
+    const days = Math.max(0, currentDay - c.lastSalaryWorldDay)
+    const amount = salaryForWorldRange(c.monthlySalary, c.jobStartedWorldDay ?? c.lastSalaryWorldDay, c.lastSalaryWorldDay, currentDay)
+    if (amount > 0) await transferFunds({ to: c.id, amount, kind: 'salary', note: `${c.occupation}·世界第${currentDay}日工资`, idempotencyKey: `salary:${c.id}:world-day:${currentDay}` })
+    if (days > 0) await db.contacts.update(c.id, { lastSalaryWorldDay: currentDay })
   }
 }

@@ -38,9 +38,9 @@ export interface Contact {
   intentQueue?: IntentItem[]
   // ---- autonomous behavior (see lib/proactiveChat.ts) ----
   lastProactiveMessageAt?: number // last time this contact proactively opened a chat, used for the per-contact cooldown
-  // ---- schedule (see lib/schedule.ts) ----
-  schedule?: ScheduleBlock[] // fixed weekly pattern, generated alongside the persona at creation time — optional since contacts created before this feature won't have one
-  scheduleOverrides?: ScheduleOverride[] // one-off exceptions negotiated in chat (see the scheduleChange bubble type), pruned once their date passes
+  // ---- retired real-calendar schedule (old-save compatibility only) ----
+  schedule?: ScheduleBlock[] // legacy data; authoritative runtime schedules live in characterSchedules
+  scheduleOverrides?: ScheduleOverride[] // legacy data; never shown to a model or used by the world engine
   // ---- MBTI (assigned by the persona-generation AI, not user-picked) ----
   mbti?: string // e.g. "INFP" — a stable personality anchor injected into every chat prompt
   // ---- auto-generated photo avatar (see lib/avatarCategory.ts + lib/photoSearch.ts) ----
@@ -54,8 +54,10 @@ export interface Contact {
   proactiveTopicHistory?: ProactiveTopicRecord[]
   occupation?: string
   monthlySalary?: number
-  jobStartedDate?: string
-  lastSalaryDate?: string
+  jobStartedDate?: string // legacy real-calendar cursor; retained for old saves only
+  lastSalaryDate?: string // legacy real-calendar cursor; retained for old saves only
+  jobStartedWorldDay?: number
+  lastSalaryWorldDay?: number
   /** Authoritative spatial state. Never inferred from prose or memory. */
   currentLocationId?: string
   /** Persistent authoritative clothing state. It never expires like mood. */
@@ -64,7 +66,7 @@ export interface Contact {
   defaultOutfit?: OutfitState
 }
 
-/** A recurring weekly time block — generated once at contact creation alongside the persona, not user-editable directly. */
+/** Retired real-clock schedule shape, retained only so old saves can still be imported. */
 export interface PersonaProfile {
   facts: string[]
   boundaries: string[]
@@ -82,7 +84,7 @@ export interface ScheduleBlock {
   activity: string
 }
 
-/** A one-off exception to the recurring schedule for a specific date, produced when the AI agrees to (or itself proposes) a changed plan — see the scheduleChange bubble type in chatEngine.ts. */
+/** Retired real-calendar override shape, retained only for old-save compatibility. */
 export interface ScheduleOverride {
   id: string
   date: string // "YYYY-MM-DD"
@@ -97,11 +99,13 @@ export interface ScheduleOverride {
   createdAt: number
 }
 
-/** A plan/appointment this contact made with the user, extracted from casual conversation — see memory.ts. Persists across turns until its date passes, unlike pendingEvents which fire once. */
+/** A soft plan extracted from conversation. New plans expire by fictional world day and time slot. */
 export interface PlanItem {
   id: string
   text: string // short natural-language description, e.g. "周三晚上一起去吃烧烤"
-  date?: string // "YYYY-MM-DD" if the model could resolve a concrete date from context, empty/undefined otherwise
+  date?: string // legacy real-calendar date; retained for old saves but never shown to a model
+  worldDay?: number // absolute fictional world day when the model can resolve a concrete date
+  worldSlot?: TimeSlot // fictional time slot when the model can resolve one
   createdAt: number
   confidence?: number
 }
@@ -309,7 +313,9 @@ export interface GroupPlan {
   sourceMessageId?: string
   title: string
   summary: string
-  scheduledAt?: number
+  scheduledAt?: number // legacy real timestamp; retained for old saves and never shown to a model
+  worldDay?: number
+  worldSlot?: TimeSlot
   location?: string
   participantContactIds: string[]
   status: GroupPlanStatus
@@ -461,6 +467,8 @@ export interface AppSettings {
   userMonthlySalary: number
   userJobStartedDate?: string
   userLastSalaryDate?: string
+  userJobStartedWorldDay?: number
+  userLastSalaryWorldDay?: number
   jobBabyMode: boolean
   walletMigrated?: boolean
   momentsCoverPhoto: string // data URL for the 朋友圈 page's cover banner, empty until the user sets one
@@ -749,6 +757,7 @@ export interface CharacterSchedule {
   locationId: string
   activity: string
   phoneAccess: 'available' | 'unavailable'
+  adherence?: 'required' | 'normal' | 'optional'
   priority: SchedulePriority
   sourceEventIds: string[]
   createdAt: number
@@ -786,13 +795,25 @@ export interface Appointment {
 
 export interface WorldEvent {
   id: string
-  type: 'speech' | 'movement' | 'encounter' | 'appointment' | 'phone' | 'log' | 'outfit'
+  type: 'speech' | 'movement' | 'encounter' | 'appointment' | 'phone' | 'log' | 'outfit' | 'seasonal' | 'weather' | 'story' | 'scheduleDeviation'
   worldStep: number
+  worldDay?: number
+  worldSlot?: TimeSlot
   locationId?: string
   actorId: string
   participantIds: string[]
   content: string
   visibility: 'private' | 'scene' | 'public'
+  directedEventKey?: string
+  importance?: number
+  scheduleId?: string
+  plannedLocationId?: string
+  actualLocationId?: string
+  deviationReason?: string
+  deviationImpact?: 'low' | 'moderate' | 'high' | 'critical'
+  adjudicationConfidence?: number
+  evidenceIds?: string[]
+  adjudicationExplanation?: string
   createdAt: number
 }
 
@@ -887,7 +908,10 @@ export type LifeEventType = 'routine' | 'work' | 'social' | 'mood' | 'goal' | 's
 
 export interface SimulationState {
   id: 'global'
-  lastSimulatedAt: number
+  lastSimulatedAt?: number // legacy device-time cursor
+  lastWorldStep?: number
+  lastWorldDay?: number
+  lastWorldSlot?: TimeSlot
   seed: string
   version: number
   lastStatus?: string
@@ -903,6 +927,10 @@ export interface ContactLifeState {
   currentGoal?: string
   situation?: string
   updatedAt: number
+  worldDay?: number
+  worldSlot?: TimeSlot
+  worldStep?: number
+  weatherLabel?: string
 }
 
 export interface LifeEvent {
@@ -916,6 +944,11 @@ export interface LifeEvent {
   importance: number
   occurredAt: number
   expiresAt?: number
+  worldDay?: number
+  worldSlot?: TimeSlot
+  worldStep?: number
+  expiresWorldDay?: number
+  weatherLabel?: string
   surfacedAsMessage?: boolean
   surfacedAsMoment?: boolean
 }
