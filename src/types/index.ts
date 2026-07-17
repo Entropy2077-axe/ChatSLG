@@ -474,7 +474,6 @@ export interface AiTurnDebug {
   conversationId: string
   raw: string
   parsed: unknown
-  knowledgeQueries: string[]
   promptTrace?: PromptTrace
   logicTrace?: {
     worldVersion: number
@@ -587,7 +586,7 @@ export interface AppSettings {
 }
 
 export interface AdminLogRecord { id: string; level: 'log' | 'info' | 'warn' | 'error'; message: string; createdAt: number }
-export type AdminAiTraceStage = 'first_chat' | 'first_quality' | 'second_chat' | 'other' | 'second_quality' | 'state'
+export type AdminAiTraceStage = 'first_chat' | 'first_quality' | 'second_chat' | 'other' | 'second_quality' | 'state' | 'state_retry'
 export interface AdminAiTrace {
   id: string
   purpose: AiUsagePurpose
@@ -1143,7 +1142,6 @@ export interface GroupAiResponse {
   groupVibe: string
   planCandidates?: { title: string; summary: string; participantIndexes: number[]; location?: string }[]
   memoryCandidates?: { contactName: string; content: string }[]
-  knowledgeQueries?: string[]
   outfitChanges?: OutfitChangeProposal[]
   scheduleChanges?: ScheduleChangeProposal[]
   locationChanges?: LocationChangeProposal[]

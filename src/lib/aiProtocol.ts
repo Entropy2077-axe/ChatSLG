@@ -3,7 +3,6 @@ import { normalizeMood } from './mood'
 
 export interface ParsedAiTurn {
   bubbles: AiBubble[]
-  knowledgeQueries: string[]
   mood?: string
   thought?: string
   outfitChange?: OutfitChangeProposal
@@ -14,14 +13,13 @@ export function parseAiResponse(raw: string): ParsedAiTurn {
   const trimmedRaw = raw.trim()
 
   if (!trimmedRaw) {
-    return { bubbles: [], knowledgeQueries: [], mood: undefined }
+    return { bubbles: [], mood: undefined }
   }
 
   const jsonResult = tryParseJson(trimmedRaw)
   if (jsonResult) {
     return {
       bubbles: jsonResult.bubbles,
-      knowledgeQueries: jsonResult.knowledgeQueries,
       mood: jsonResult.mood,
       thought: jsonResult.thought,
       outfitChange: jsonResult.outfitChange,
@@ -34,17 +32,7 @@ export function parseAiResponse(raw: string): ParsedAiTurn {
     .map((line) => line.trim())
     .filter(Boolean)
     .map((content) => ({ type: 'text', content }))
-  return { bubbles: fallbackBubbles, knowledgeQueries: [], mood: undefined }
-}
-
-export function parseKnowledgeQueriesField(raw: unknown): string[] {
-  if (!Array.isArray(raw)) return []
-  const result: string[] = []
-  for (const q of raw) {
-    if (typeof q === 'string' && q.trim()) result.push(q.trim())
-    if (result.length >= 2) break
-  }
-  return result
+  return { bubbles: fallbackBubbles, mood: undefined }
 }
 
 function tryParseJson(trimmedRaw: string): ParsedAiTurn | null {
@@ -96,7 +84,7 @@ function tryParseJson(trimmedRaw: string): ParsedAiTurn | null {
   const thought = typeof parsed.thought === 'string' && parsed.thought.trim() ? parsed.thought.trim().slice(0, 100) : undefined
   const outfitChange = parseOutfitChange(parsed.outfitChange)
   const locationChange = parseLocationChange(parsed.locationChange)
-  return { bubbles, knowledgeQueries: [], mood, thought, outfitChange, locationChange }
+  return { bubbles, mood, thought, outfitChange, locationChange }
 }
 
 export function parseLocationChange(raw: unknown): LocationChangeProposal | undefined {
@@ -170,7 +158,6 @@ export function parseRawPrivateDraft(raw: string, fallbackMood: string = '😌')
   }
   return {
     bubbles,
-    knowledgeQueries: [],
     mood: normalizeMood(moodMatch?.[1], normalizeMood(fallbackMood)),
     thought: legacyTurnThought ?? bubbles.at(-1)?.thought,
   }

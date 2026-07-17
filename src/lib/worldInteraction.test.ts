@@ -15,7 +15,7 @@ describe('world interaction helpers', () => {
   it('keeps the configured reply-count ranges stable', () => {
     expect(CHAT_LIVELINESS.quiet).toMatchObject({ min: 1, max: 2 })
     expect(CHAT_LIVELINESS.normal).toMatchObject({ min: 3, max: 4 })
-    expect(CHAT_LIVELINESS.lively).toMatchObject({ min: 5, max: 6 })
+    expect(CHAT_LIVELINESS.lively).toMatchObject({ min: 7, max: 7 })
   })
 
   it('only accepts complete, source-grounded location changes', () => {

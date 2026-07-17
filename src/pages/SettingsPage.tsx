@@ -237,7 +237,7 @@ export function SettingsPage() {
           {([
             ['quiet', '冷清', '每轮 1–2 条'],
             ['normal', '一般', '每轮 3–4 条'],
-            ['lively', '热闹', '每轮 5–6 条'],
+            ['lively', '热闹', '每轮固定 7 条'],
           ] as const).map(([value, label, detail]) => <button key={value} onClick={() => setSettings({ chatLiveliness: value })} className={`rounded-lg border px-2 py-2 text-left ${chatLiveliness === value ? 'border-violet-600 bg-violet-50 text-violet-700' : 'border-gray-200 text-gray-600'}`}><span className="block text-sm">{label}</span><span className="block text-[10px] opacity-70">{detail}</span></button>)}
         </div>
       </section>

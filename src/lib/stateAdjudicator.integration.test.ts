@@ -63,4 +63,48 @@ describe('state application receipts and shared appointments', () => {
     expect(new Set(planned[0].acceptedParticipantIds)).toEqual(new Set(['a', 'b']))
     expect(new Set(planned[0].conversationIds)).toEqual(new Set(['ca', 'cb']))
   })
+
+  it('rejects a silent listener while preserving another character valid independent dimension', async () => {
+    const world = await db.worldState.get('global')
+    const mixedInput: StateAdjudicationInput = {
+      scene: 'scene',
+      conversationId: 'ca',
+      characterIds: ['a', 'b'],
+      settings,
+      evidence: [
+        { id: 'ea', actorId: 'a', actorName: 'A', content: '好，我现在戴上蝴蝶结', perceivedBy: ['a', 'b'] },
+        { id: 'eu', actorId: 'user', actorName: '用户', content: '你们都去客厅吧', perceivedBy: ['a', 'b'] },
+      ],
+    }
+    const mixedResult: StateAdjudicationResult = {
+      review: { valid: true, reason: '' },
+      worldVersion: world!.worldVersion,
+      day: world!.day,
+      pendingIntents: [],
+      receipts: [],
+      decisions: [
+        {
+          characterId: 'a',
+          evidenceIds: ['ea'],
+          outfit: { shouldChange: true, timing: 'immediate', patch: { accessories: '蝴蝶结' }, reason: '本人明确执行' },
+          schedule: { shouldChange: false },
+          location: { shouldChange: false },
+        },
+        {
+          characterId: 'b',
+          evidenceIds: ['eu'],
+          outfit: { shouldChange: false },
+          schedule: { shouldChange: false },
+          location: { shouldChange: true, locationId: 'home-living', reason: '用户提议' },
+        },
+      ],
+    }
+    const receipts = await commitStateAdjudication(mixedInput, mixedResult)
+    expect(receipts).toEqual(expect.arrayContaining([
+      expect.objectContaining({ characterId: 'a', kind: 'outfit', status: 'applied' }),
+      expect.objectContaining({ characterId: 'b', kind: 'location', status: 'rejected' }),
+    ]))
+    expect(await db.outfitConstraints.where('characterId').equals('a').count()).toBe(1)
+    expect((await db.contacts.get('b'))?.currentLocationId).toBeUndefined()
+  })
 })

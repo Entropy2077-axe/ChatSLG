@@ -1,7 +1,7 @@
 import { v4 as uuid } from 'uuid'
 import { db } from '../db/db'
 import type { AdminAiTraceStage, AppSettings, OutfitPart, PendingStateIntent, StateApplicationReceipt, TimeSlot } from '../types'
-import { chatCompletion } from './deepseek'
+import { chatCompletion, type ChatMessage } from './deepseek'
 import { extractJsonObject } from './aiProtocol'
 import { buildLogicContext, type LogicContextBundle } from './logicContext'
 import { addOutfitConstraint, addScheduleConstraint, normalizedSlots } from './temporaryConstraints'
@@ -25,6 +25,8 @@ export interface StateAdjudicationInput {
   characterIds: string[]
   evidence: StateEvidence[]
   settings: AppSettings
+  /** Used by the isolated regression runner; normal production callers may omit it. */
+  signal?: AbortSignal
   trace?: { turnId: string; stage: AdminAiTraceStage; conversationId?: string }
   /** Present for chat turns. The utility model reviews objective continuity
    * and hard-fact consistency while it is already adjudicating state. */
@@ -51,6 +53,25 @@ export interface StateAdjudicationResult {
   worldVersion: number
   day: number
   receipts: StateApplicationReceipt[]
+}
+
+export interface StateValidationIssue {
+  code: string
+  message: string
+  characterId?: string
+  kind?: 'outfit' | 'schedule' | 'location'
+  fatal?: boolean
+}
+
+interface ParsedStateAdjudication {
+  review: { valid: boolean; reason: string }
+  decisions: StateDecision[]
+  pendingIntents: PendingStateIntent[]
+}
+
+export interface StateAdjudicationParseResult {
+  value?: ParsedStateAdjudication
+  issues: StateValidationIssue[]
 }
 
 const OUTFIT_PARTS: OutfitPart[] = ['head', 'top', 'bottom', 'outerwear', 'footwear', 'accessories']
@@ -107,22 +128,39 @@ appointments=${state.commitments.filter((item) => item.day <= first.clock.day + 
 ${characterText}`
 }
 
-function parseAdjudication(raw: string): { review: { valid: boolean; reason: string }; decisions: StateDecision[]; pendingIntents: PendingStateIntent[] } {
+export function parseStateAdjudication(raw: string): StateAdjudicationParseResult {
   const json = extractJsonObject(raw)
-  if (!json) return { review: { valid: false, reason: '多功能模型没有返回可解析JSON' }, decisions: [], pendingIntents: [] }
+  if (!json) return { issues: [{ code: 'non_json', message: '状态模型没有返回可解析JSON', fatal: true }] }
   try {
     const parsed = JSON.parse(json) as { replyReview?: { valid?: unknown; reason?: unknown }; decisions?: unknown; pendingIntents?: unknown }
+    const issues: StateValidationIssue[] = []
+    if (!parsed.replyReview || typeof parsed.replyReview.valid !== 'boolean' || typeof parsed.replyReview.reason !== 'string') {
+      issues.push({ code: 'missing_reply_review', message: 'replyReview.valid/reason缺失或类型错误', fatal: true })
+    }
+    if (!Array.isArray(parsed.decisions)) issues.push({ code: 'missing_decisions', message: 'decisions必须是数组', fatal: true })
     const decisions = (Array.isArray(parsed.decisions) ? parsed.decisions : []).flatMap((item) => {
-      if (!item || typeof item !== 'object') return []
+      if (!item || typeof item !== 'object') {
+        issues.push({ code: 'invalid_decision', message: 'decision不是对象', fatal: true })
+        return []
+      }
       const value = item as StateDecision & { sourceEventIds?: string[]; outfitChange?: StateDecision['outfit']; scheduleChange?: StateDecision['schedule']; locationChange?: StateDecision['location'] }
-      if (typeof value.characterId !== 'string') return []
-      return [{
+      if (typeof value.characterId !== 'string' || !value.characterId.trim()) {
+        issues.push({ code: 'missing_character', message: 'decision缺少characterId', fatal: true })
+        return []
+      }
+      const normalized = {
         ...value,
         evidenceIds: Array.isArray(value.evidenceIds) ? value.evidenceIds : Array.isArray(value.sourceEventIds) ? value.sourceEventIds : [],
         outfit: value.outfit ?? value.outfitChange,
         schedule: value.schedule ?? value.scheduleChange,
         location: value.location ?? value.locationChange,
-      }]
+      }
+      for (const kind of ['outfit', 'schedule', 'location'] as const) {
+        if (!normalized[kind] || typeof normalized[kind]?.shouldChange !== 'boolean') {
+          issues.push({ code: 'missing_dimension', message: `${value.characterId}.${kind}.shouldChange缺失`, characterId: value.characterId, kind })
+        }
+      }
+      return [normalized]
     })
     const pendingIntents = (Array.isArray(parsed.pendingIntents) ? parsed.pendingIntents : []).flatMap((item) => {
       if (!item || typeof item !== 'object') return []
@@ -142,21 +180,193 @@ function parseAdjudication(raw: string): { review: { valid: boolean; reason: str
       }]
     })
     return {
-      review: {
+      value: {
+        review: {
         valid: parsed.replyReview?.valid !== false,
         reason: typeof parsed.replyReview?.reason === 'string' ? parsed.replyReview.reason.trim().slice(0, 240) : '',
+        },
+        decisions,
+        pendingIntents,
       },
-      decisions,
-      pendingIntents,
+      issues,
     }
   } catch {
-    return { review: { valid: false, reason: '多功能模型返回的JSON格式无效' }, decisions: [], pendingIntents: [] }
+    return { issues: [{ code: 'invalid_json', message: '状态模型返回的JSON格式无效', fatal: true }] }
   }
+}
+
+export interface StateValidationContext {
+  characterIds: string[]
+  evidence: StateEvidence[]
+  day: number
+  validLocations: Array<{ id: string; name: string }>
+  recentText: string
+  pendingIntents: PendingStateIntent[]
+}
+
+function containsExplicitRefusal(text: string, kind: 'outfit' | 'schedule' | 'location'): boolean {
+  const generic = /(?:^|[，。！？,.!?\s])(?:不行|不了|不要|拒绝|算了|没空|no|nope|can't|cannot|won't|will not)(?:$|[，。！？,.!?\s])/i
+  if (generic.test(text)) return true
+  if (kind === 'outfit') return /不(?:穿|戴|换)|别让我(?:穿|戴|换)/.test(text)
+  return /不(?:去|走|出发)|别(?:去|走|出发)/.test(text)
+}
+
+function containsTentativeIntent(text: string, kind: 'outfit' | 'schedule' | 'location'): boolean {
+  const tentative = /要不|不如|要不要|也许|可能|或许|有时候|有时|改天|回头|以后再说|再看看|考虑(?:一下)?|(?:^|[，。！？,.!?\s])想(?:去|走|穿|戴|换)|\b(?:maybe|perhaps|might|could|what if|should we|someday)\b/i
+  if (!tentative.test(text)) return false
+  const explicitNow = kind === 'outfit'
+    ? /现在(?:就)?(?:穿|戴|换)|这就(?:穿|戴|换)|马上(?:穿|戴|换)|已经(?:穿|戴|换)|(?:穿|戴|换)(?:上|好|完|了)/.test(text)
+    : /现在(?:就)?(?:去|走|出发)|这就(?:去|走|出发)|马上(?:去|走|出发)|已经(?:到|去|出发)|正在(?:去|走|前往)|(?:走|出发)(?:吧|了)|我(?:现在)?去(?:了|啦)/.test(text)
+  return !explicitNow
+}
+
+function hasImmediateLocationCommitment(characterId: string, latestOwnText: string, evidence: StateEvidence[]): boolean {
+  if (/现在(?:就)?(?:去|走|出发)|这就(?:去|走|出发)|马上(?:去|走|出发)|已经(?:到|去|出发)|正在(?:去|走|前往)|走{2,}|(?:走|出发)(?:吧|了)|我(?:现在)?去(?:了|啦)/.test(latestOwnText)) return true
+  if (/稍后|等会|待会|一会儿|明天|明晚|今晚|以后|改天|回头|later|tomorrow|tonight/i.test(latestOwnText)) return false
+  const userText = evidence.filter((event) => event.actorId === 'user' && event.perceivedBy.includes(characterId)).map((event) => event.content).join('\n')
+  if (/有时候|有时|也许|可能|或许|想(?:去|走)|改天|回头|以后|明天|明晚|今晚|稍后|等会|待会|\b(?:maybe|perhaps|might|someday|tomorrow|later)\b/i.test(userText)) return false
+  const currentRequest = /现在|这就|马上|走[,，！!]?|别.{0,12}(?:待|留).{0,8}(?:去|走)|(?:去|走).{0,12}(?:吧|呗)|\bgo now\b/i.test(userText)
+  const accepted = /(?:^|[，。！？,.!?\s])(?:好|行|可以|没问题|走吧|去吧|成)(?:$|[，。！？,.!?\s])|我(?:也)?(?:陪你)?去/.test(latestOwnText)
+  return currentRequest && accepted && !containsTentativeIntent(latestOwnText, 'location')
+}
+
+function imageOnlyOutfitEvidence(text: string): boolean {
+  const imageContext = /照片|图片|自拍|旧照|相册|画面|回忆(?:里|中)|photo|picture|selfie|album/i
+  const realAction = /(?:现在|刚刚|已经|这就|马上)?\s*(?:穿上|换上|脱掉|摘下|戴上|换掉)|(?:put on|take off|changed into|wearing now)/i
+  return imageContext.test(text) && !realAction.test(text)
+}
+
+function chineseNumber(value: string): number | undefined {
+  if (/^\d+$/.test(value)) return Number(value)
+  const digits: Record<string, number> = { 一: 1, 二: 2, 两: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9, 十: 10 }
+  return digits[value]
+}
+
+function temporalExpectation(text: string, day: number): { day?: number; slot?: TimeSlot; durationDays?: number } {
+  const result: { day?: number; slot?: TimeSlot; durationDays?: number } = {}
+  if (/后天/.test(text)) result.day = day + 2
+  else if (/明晚|明天|tomorrow/i.test(text)) result.day = day + 1
+  else if (/今晚|今天|today|tonight/i.test(text)) result.day = day
+  if (/明晚|今晚|tomorrow evening|tonight/i.test(text)) result.slot = 'evening'
+  const duration = text.match(/连续\s*([一二两三四五六七八九十\d]+)\s*天/)
+  if (duration) result.durationDays = chineseNumber(duration[1])
+  return result
+}
+
+function normalizeLocationMention(value: string): string {
+  return value.toLowerCase().replace(/\s+/g, '').replace(/咖啡(?:店|厅)/g, '咖啡')
+}
+
+function dimensionChanges(decision: StateDecision, kind: 'outfit' | 'schedule' | 'location'): boolean {
+  return decision[kind]?.shouldChange === true
+}
+
+export function validateStateAdjudication(value: ParsedStateAdjudication, context: StateValidationContext): StateValidationIssue[] {
+  const issues: StateValidationIssue[] = []
+  const expectedIds = new Set(context.characterIds)
+  const seen = new Set<string>()
+  if (!value.review.valid) {
+    if (value.decisions.some((decision) => ['outfit', 'schedule', 'location'].some((kind) => dimensionChanges(decision, kind as 'outfit' | 'schedule' | 'location')))) {
+      issues.push({ code: 'review_with_changes', message: 'replyReview无效时不得提交状态变化', fatal: true })
+    }
+    return issues
+  }
+  for (const decision of value.decisions) {
+    if (!expectedIds.has(decision.characterId)) {
+      issues.push({ code: 'wrong_character', message: `角色${decision.characterId}不在本轮候选名单`, characterId: decision.characterId })
+      continue
+    }
+    if (seen.has(decision.characterId)) issues.push({ code: 'duplicate_character', message: `角色${decision.characterId}出现重复decision`, characterId: decision.characterId })
+    seen.add(decision.characterId)
+  }
+  for (const characterId of expectedIds) if (!seen.has(characterId)) {
+    issues.push({ code: 'missing_character', message: `缺少角色${characterId}的独立decision`, characterId })
+  }
+
+  const validLocationIds = new Set(context.validLocations.map((location) => location.id))
+  const groundingText = `${context.evidence.map((event) => event.content).join('\n')}\n${context.recentText}\n${JSON.stringify(context.pendingIntents)}`
+  const timeText = context.evidence.map((event) => event.content).join('\n')
+  const expectedTime = temporalExpectation(timeText, context.day)
+
+  for (const decision of value.decisions) {
+    if (!expectedIds.has(decision.characterId)) continue
+    const referenced = context.evidence.filter((event) => decision.evidenceIds.includes(event.id))
+    const ownEvidence = referenced.filter((event) => event.actorId === decision.characterId)
+    const latestOwnText = context.evidence.filter((event) => event.actorId === decision.characterId).at(-1)?.content ?? ''
+    for (const kind of ['outfit', 'schedule', 'location'] as const) {
+      if (!dimensionChanges(decision, kind)) continue
+      const issue = (code: string, message: string) => issues.push({ code, message, characterId: decision.characterId, kind })
+      if (ownEvidence.length === 0) {
+        issue('missing_own_evidence', `${decision.characterId}.${kind}没有引用该角色本人本轮发言`)
+        continue
+      }
+      if (containsExplicitRefusal(latestOwnText, kind)) issue('explicit_refusal', `${decision.characterId}.${kind}与角色最新明确拒绝相冲突`)
+      if (containsTentativeIntent(latestOwnText, kind)) issue('tentative_intent', `${decision.characterId}.${kind}只有试探、愿望或建议，没有明确执行`)
+      if (kind === 'location' && !hasImmediateLocationCommitment(decision.characterId, latestOwnText, context.evidence)) {
+        issue('location_not_immediate', `${decision.characterId}.location没有“现在执行”或对当前行动请求的明确承接`)
+      }
+      if (kind === 'outfit') {
+        if (ownEvidence.every((event) => imageOnlyOutfitEvidence(event.content))) issue('image_only_outfit', `${decision.characterId}.outfit只有照片或回忆画面证据`)
+        if (decision.outfit?.timing === 'future' && expectedTime.durationDays) {
+          const expectedEnd = context.day + expectedTime.durationDays - 1
+          if (decision.outfit.startDay !== context.day || decision.outfit.endDay !== expectedEnd) {
+            issue('outfit_date_mismatch', `${decision.characterId}.outfit连续${expectedTime.durationDays}天应为第${context.day}天至第${expectedEnd}天`)
+          }
+        }
+      } else {
+        const locationId = decision[kind]?.locationId
+        if (!locationId || !validLocationIds.has(locationId)) issue('invalid_location', `${decision.characterId}.${kind}引用了非法地点ID`)
+        else {
+          const location = context.validLocations.find((candidate) => candidate.id === locationId)!
+          const normalizedGrounding = normalizeLocationMention(groundingText)
+          if (!groundingText.includes(location.id) && !normalizedGrounding.includes(normalizeLocationMention(location.name))) {
+            issue('ungrounded_location', `${decision.characterId}.${kind}的目标地点${location.name}没有出现在本轮证据或待确认提案中`)
+          }
+        }
+        if (kind === 'schedule') {
+          if (expectedTime.day !== undefined && decision.schedule?.startDay !== expectedTime.day) {
+            issue('schedule_day_mismatch', `${decision.characterId}.schedule应从世界第${expectedTime.day}天开始`)
+          }
+          if (expectedTime.slot && !decision.schedule?.slots?.includes(expectedTime.slot)) {
+            issue('schedule_slot_mismatch', `${decision.characterId}.schedule应包含${expectedTime.slot}时段`)
+          }
+        }
+      }
+    }
+  }
+  return issues
+}
+
+function sanitizeStateDecisions(
+  value: ParsedStateAdjudication | undefined,
+  issues: StateValidationIssue[],
+  characterIds: string[],
+): StateDecision[] {
+  if (!value || issues.some((issue) => issue.fatal)) return []
+  const invalid = new Set(issues.flatMap((issue) => issue.characterId && issue.kind ? [`${issue.characterId}:${issue.kind}`] : []))
+  const seen = new Set<string>()
+  return value.decisions
+    .filter((decision) => {
+      if (!characterIds.includes(decision.characterId) || seen.has(decision.characterId)) return false
+      seen.add(decision.characterId)
+      return true
+    })
+    .map((decision) => ({
+      ...decision,
+      outfit: invalid.has(`${decision.characterId}:outfit`) ? { shouldChange: false } : decision.outfit,
+      schedule: invalid.has(`${decision.characterId}:schedule`) ? { shouldChange: false } : decision.schedule,
+      location: invalid.has(`${decision.characterId}:location`) ? { shouldChange: false } : decision.location,
+    }))
 }
 
 function samePatch(a: Record<string, string>, b: Record<string, string>): boolean {
   const keys = Object.keys(a)
   return keys.length === Object.keys(b).length && keys.every((key) => a[key] === b[key])
+}
+
+function canonicalizeOutfitValue(value: string): string {
+  const colors = '黑白红蓝绿黄灰紫粉棕橙'
+  return value.replace(new RegExp(`^([${colors}])(?![色${colors}])`), '$1色')
 }
 
 async function markEvidenceConsumed(evidenceIds: string[], kind: 'outfit' | 'schedule' | 'location'): Promise<void> {
@@ -179,6 +389,11 @@ async function applyDecision(input: StateAdjudicationInput, decision: StateDecis
     for (const kind of ['outfit', 'schedule', 'location'] as const) if (decision[kind]?.shouldChange) receipt(kind, 'rejected', '没有引用本轮中该角色真实感知的证据ID')
     return receipts
   }
+  const ownEvidence = new Set(input.evidence.filter((event) => event.actorId === contact.id).map((event) => event.id))
+  if (!evidenceIds.some((id) => ownEvidence.has(id))) {
+    for (const kind of ['outfit', 'schedule', 'location'] as const) if (decision[kind]?.shouldChange) receipt(kind, 'rejected', '状态变化没有引用该角色本人本轮发言')
+    return receipts
+  }
 
   if (decision.outfit?.shouldChange === true && decision.outfit.patch) {
     const patch = Object.fromEntries(OUTFIT_PARTS.flatMap((part) => {
@@ -186,7 +401,7 @@ async function applyDecision(input: StateAdjudicationInput, decision: StateDecis
       if (value === null) return [[part, '无']]
       if (typeof value !== 'string') return []
       const normalized = value.trim()
-      return [[part, normalized ? normalized.slice(0, 80) : '无']]
+      return [[part, normalized ? canonicalizeOutfitValue(normalized).slice(0, 80) : '无']]
     })) as Record<string, string>
     const currentPatch = Object.fromEntries(Object.keys(patch).map((key) => [key, String(contact.outfit?.[key as OutfitPart] ?? '')]))
     if (Object.keys(patch).length > 0 && !samePatch(patch, currentPatch)) {
@@ -255,7 +470,7 @@ async function applyDecision(input: StateAdjudicationInput, decision: StateDecis
   return receipts
 }
 
-function buildUnifiedPrompt(input: StateAdjudicationInput, stateText: string, recentText: string, evidenceText: string, pending: PendingStateIntent[]): string {
+function buildUnifiedPrompt(input: StateAdjudicationInput, stateText: string, recentText: string, evidenceText: string, pending: PendingStateIntent[], day: number): string {
   const reviewText = input.replyReview
     ? `【本轮待审查回复】\n${input.replyReview.draftText}\n\n【只与本轮有关的人设硬事实】\n${input.replyReview.personaFacts || '无'}`
     : '【本轮待审查回复】\n无；replyReview.valid固定为true，只做状态裁决。'
@@ -270,6 +485,7 @@ ${reviewText}
 
 【权威状态与合法候选ID】
 ${stateText}
+时间锚点：今天=世界第${day}天；今晚=第${day}天/evening；明天或明晚=第${day + 1}天，其中明晚必须是evening；后天=第${day + 2}天。
 
 【尚未解决的提案账本】
 ${pending.length ? JSON.stringify(pending.map(({ createdAt: _createdAt, ...item }) => item)) : '无'}
@@ -281,12 +497,16 @@ ${recentText || '无'}
 ${evidenceText}
 
 规则：
+- replyReview.valid=true时，必须为每个候选角色恰好输出一个decision，并且outfit/schedule/location三个对象及各自shouldChange布尔值都必须存在；没有变化也要明确false。
 - 描述、疑问、建议、玩笑、拒绝和含糊意向不改状态；角色本人明确接受或明确执行才可改变，不能替别人同意。
+- 任一shouldChange=true都必须至少引用一条actorId等于该characterId的本轮证据。仅仅出现在perceivedBy中表示听见了，不表示同意。
 - 紧跟具体提案的“嗯/好/行/走吧/okay/sure”等无拒绝语义的短回复是明确接受，可结合提案账本确定目标。
 - 现在出发才改location；今晚、明天、稍后等只写schedule。未来日程一旦被接受应立即登记，但不能提前移动。
 - 穿上、脱下、更换才改outfit。立即执行timing=immediate；未来或持续穿戴timing=future。脱掉写对应字段为“无”。
+- 照片、自拍、相册、旧照、画面或回忆中的衣着不代表现实衣着，除非角色另有明确的现实穿脱动作。
 - 配饰统一写accessories（蝴蝶结、发箍、发卡、首饰、围巾、领带、手表、眼镜）；持续七天戴配饰仍是outfit，不是schedule。
 - schedule必须含合法locationId、startDay/endDay、slots、activity、phoneAccess和priority。共同约定写participantIds；每个AI仍需自己的同意证据。
+- schedule/location的目标地点必须由本轮证据、较近对话或待确认提案明确指向；遇到不存在的地点不得擅自替换成另一个合法地点。
 - 当前已是目标状态、没有新事实或旧事件已生效时不得重复改变。
 - pendingIntent只保存具体且尚未解决的提案，最多6条；必须使用真实characterId和当前证据ID。旧账本仍未解决时可原样保留。
 - replyReview.valid=false时decisions必须为空，reason用一句人能看懂的话指出主模型应如何纠正；格式问题不属于这里，本轮输入已经可解析。
@@ -404,7 +624,7 @@ ${evidenceText}
 {"decisions":[{"characterId":"必须逐字使用上方真实ID","evidenceIds":["真实事件ID"],"outfit":{"shouldChange":false,"timing":"immediate|future","patch":{},"startDay":1,"endDay":1,"slots":["morning"],"reason":""},"schedule":{"shouldChange":false,"startDay":1,"endDay":1,"slots":["evening"],"locationId":"合法叶子ID","activity":"","phoneAccess":"available","priority":"commitment","participantIds":["user","角色真实ID"],"reason":""},"location":{"shouldChange":false,"locationId":"合法叶子ID","reason":""}}]}`
   const conversation = await db.conversations.get(input.conversationId)
   const pendingIntents = (conversation?.pendingStateIntents ?? []).filter((item) => uniqueIds.includes(item.characterId)).slice(-6)
-  prompt = buildUnifiedPrompt(input, stateText, recentConversationText, evidenceText, pendingIntents)
+  prompt = buildUnifiedPrompt(input, stateText, recentConversationText, evidenceText, pendingIntents, bundles[0].clock.day)
   while (estimateTokens(prompt) > UTILITY_INPUT_TOKEN_BUDGET && packedRecentTurns.length > 0) {
     const previousRecentText = recentConversationText
     packedRecentTurns.shift()
@@ -413,9 +633,55 @@ ${evidenceText}
   }
   const estimatedInputTokens = estimateTokens(prompt)
   if (estimatedInputTokens > UTILITY_INPUT_TOKEN_BUDGET) throw new Error(`统一裁决必需上下文约${estimatedInputTokens} tokens，超过8K模型的安全输入预算${UTILITY_INPUT_TOKEN_BUDGET}；没有截断当前证据，请减少本轮涉及角色或拆分群聊裁决`)
-  const raw = await chatCompletion({ apiKey: input.settings.apiKey, baseUrl: input.settings.baseUrl, model: input.settings.utilityModel, jsonMode: true, thinking: 'disabled', temperature: 0, maxTokens: Math.min(1700, Math.max(900, uniqueIds.length * 360 + 360)), purpose: 'other', messages: [{ role: 'system', content: prompt }, { role: 'user', content: '审查并裁决当前回合。' }], trace: input.trace })
-  const adjudication = parseAdjudication(raw)
-  const { decisions } = adjudication
+  const validLocations = (() => {
+    const parentIds = new Set(bundles[0].locations.map((location) => location.parentId).filter(Boolean))
+    return bundles[0].locations.filter((location) => !parentIds.has(location.id)).map((location) => ({ id: location.id, name: location.name }))
+  })()
+  const validationContext: StateValidationContext = {
+    characterIds: uniqueIds,
+    evidence: activeEvidence,
+    day: bundles[0].clock.day,
+    validLocations,
+    recentText: recentConversationText,
+    pendingIntents,
+  }
+  const requestAdjudication = (messages: ChatMessage[], stage: 'state' | 'state_retry') => chatCompletion({
+    apiKey: input.settings.apiKey,
+    baseUrl: input.settings.baseUrl,
+    model: input.settings.utilityModel,
+    jsonMode: true,
+    thinking: 'disabled',
+    temperature: 0,
+    maxTokens: Math.min(1700, Math.max(900, uniqueIds.length * 360 + 360)),
+    purpose: 'other',
+    messages,
+    trace: { ...(input.trace ?? { turnId: uuid() }), stage },
+    signal: input.signal,
+  })
+  let raw = await requestAdjudication([{ role: 'system', content: prompt }, { role: 'user', content: '审查并裁决当前回合。' }], 'state')
+  let parsedResult = parseStateAdjudication(raw)
+  let validationIssues = [
+    ...parsedResult.issues,
+    ...(parsedResult.value ? validateStateAdjudication(parsedResult.value, validationContext) : []),
+  ]
+  let firstRaw: string | undefined
+  if (validationIssues.length > 0) {
+    firstRaw = raw
+    const issueText = validationIssues.map((issue) => `- ${issue.message}`).join('\n')
+    raw = await requestAdjudication([
+      { role: 'system', content: prompt },
+      { role: 'assistant', content: firstRaw },
+      { role: 'user', content: `上一版状态裁决未通过确定性校验：\n${issueText}\n请重新输出完整JSON。不得解释，不得省略任何候选角色或三个状态维度；没有变化必须明确shouldChange=false。` },
+    ], 'state_retry')
+    parsedResult = parseStateAdjudication(raw)
+    validationIssues = [
+      ...parsedResult.issues,
+      ...(parsedResult.value ? validateStateAdjudication(parsedResult.value, validationContext) : []),
+    ]
+  }
+  const adjudication = parsedResult.value ?? { review: { valid: true, reason: '' }, decisions: [], pendingIntents: [] }
+  const decisions = sanitizeStateDecisions(adjudication, validationIssues, uniqueIds)
+  if (validationIssues.length > 0) console.warn('[state] 修复后仍有无效状态维度，已失败关闭', validationIssues.map((issue) => issue.message))
   const sceneLabel = { private_phone: '手机私聊', group_phone: '手机群聊', moment: '朋友圈', scene: '地点群聊' }[input.scene]
   const locationNames = new Map(bundles[0].locations.map((location) => [location.id, location.name]))
   const readableDecisions = decisions.flatMap((decision) => {
@@ -432,16 +698,15 @@ ${evidenceText}
   const adjudicationTraceId = uuid()
   await db.aiTurns.add({
     id: adjudicationTraceId, conversationId: input.conversationId, raw,
-    parsed: { kind: 'unifiedTurnAdjudication', scene: input.scene, evidence: input.evidence, review: adjudication.review, decisions, pendingIntents: adjudication.pendingIntents, estimatedInputTokens },
-    knowledgeQueries: [],
+    parsed: { kind: 'unifiedTurnAdjudication', scene: input.scene, evidence: input.evidence, firstRaw, review: adjudication.review, decisions, pendingIntents: adjudication.pendingIntents, validationIssues, estimatedInputTokens },
     logicTrace: {
       worldVersion, locationTreeVersion: worldVersion,
       personaSummaries: bundles.map((bundle) => `${bundle.subject.character.id}:${bundle.subject.character.name}`),
       schedules: bundles.flatMap((bundle) => [...bundle.subject.baseSchedule, ...bundle.subject.scheduleOverrides].map((item) => `${item.characterId}/${item.priority}/${item.effectiveDay ?? item.dayOfWeek}/${item.slot}@${item.locationId}`)),
       appointmentIds: bundles.flatMap((bundle) => bundle.subject.commitments.map((item) => item.id)),
       memoryIds: [], perceivedEventIds: input.evidence.map((item) => item.id),
-      validation: adjudication.review.valid ? 'passed' : 'rejected',
-      validationReason: adjudication.review.valid ? undefined : adjudication.review.reason,
+      validation: adjudication.review.valid && validationIssues.length === 0 ? 'passed' : 'rejected',
+      validationReason: validationIssues.length ? validationIssues.map((issue) => issue.message).join('；').slice(0, 500) : adjudication.review.valid ? undefined : adjudication.review.reason,
     },
     createdAt: Date.now(),
   })

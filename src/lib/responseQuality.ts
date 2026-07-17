@@ -211,7 +211,7 @@ Treat a later explicit state as replacing an earlier one. A speaker must not rep
 Persona is a hard logical premise for every speaker: reject a speaker whose response could be factually possible but is generic or contradicts the speaker's stated trait, boundary, habit, MBTI, or behavior anchor. In any plausible alternative, require the response that best reflects that speaker's distinctive personality without inventing facts.
 Also check the protocol: speakerIndex must be one of the listed speakers; content must not contain leaked <name>, speaker-name prefixes, parenthesized thoughts, bracketed moods, or wrapping quotes; every message must include non-empty thought and mood, and they must not leak into content; groupVibe must be present and non-empty.${opts.worldbookText ? ' Content grounded in an active worldbook entry is NOT "invented facts" — worldbook defines canon world rules.' : ''}
 If valid, return valid=true and omit fixedRaw.
-If invalid, rewrite fixedRaw using this exact protocol JSON: {"messages":[{"speakerIndex":1,"speakerName":"...","type":"text","content":"...","thought":"...","mood":"..."}],"turnSummary":"...","groupVibe":"...","knowledgeQueries":[]}. Only use listed speakerIndex values. Keep it short.`
+If invalid, rewrite fixedRaw using this exact protocol JSON: {"messages":[{"speakerIndex":1,"speakerName":"...","type":"text","content":"...","thought":"...","mood":"..."}],"turnSummary":"...","groupVibe":"..."}. Only use listed speakerIndex values. Keep it short.`
   const userPrompt = `Group: ${opts.groupName}
 Speakers:
 ${speakerText}

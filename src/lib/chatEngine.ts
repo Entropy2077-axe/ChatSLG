@@ -21,6 +21,7 @@ import { adjudicateStateChanges } from './stateAdjudicator'
 import { reviewTurnLogic } from './turnLogicReviewer'
 import { isWorldPhoneAvailable } from './schedule'
 import { chatLivelinessRule } from './chatLiveliness'
+import { privateTurnRequirement, turnRepairInstruction, validatePrivateTurn } from './turnRequirements'
 import { ensureWorldInitialized, resolveSchedule } from './world'
 import type { AiBubble, AppSettings, Contact, Message, MessageType, Sticker } from '../types'
 import { messagesForAiTurn, recentConversationMessages } from './conversationStats'
@@ -162,14 +163,13 @@ function parseAiTurnDebugPayload(opts: {
   jsonRaw: string
   finalRaw: string
   bubbles: AiBubble[]
-  knowledgeQueries: string[]
   mood?: string
   thought?: string
   qualityCheck: { enabled: boolean; repaired: boolean; reason?: string; detectedInvalid?: boolean }
   injectedIntents: ReturnType<typeof activeIntents>
   promptTrace?: import('../types').PromptTrace
 }): unknown {
-  const { mainPrompt, conversionPrompt, finalRaw, jsonRaw, rawText, bubbles, knowledgeQueries, mood, thought, qualityCheck, injectedIntents, promptTrace } = opts
+  const { mainPrompt, conversionPrompt, finalRaw, jsonRaw, rawText, bubbles, mood, thought, qualityCheck, injectedIntents, promptTrace } = opts
   const trimmed = finalRaw.trim()
   const fenceMatch = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/i)
   const text = fenceMatch ? fenceMatch[1].trim() : trimmed
@@ -197,7 +197,6 @@ function parseAiTurnDebugPayload(opts: {
     qualityCheck,
     mood,
     thought,
-    knowledgeQueries,
     injectedIntents,
     memoryUpdate: null,
     promptTrace,
@@ -428,6 +427,7 @@ async function runAiTurn(
     })
 
     const recentHistory = history.slice(-CONTEXT_WINDOW_SIZE)
+    const turnRequirement = privateTurnRequirement(settings.chatLiveliness)
     const chatMessages: ChatMessage[] = coalesceConsecutiveRoles([
       // Stable persona/style comes first so DeepSeek's prefix cache can match
       // before the per-turn world state and cross-scene records diverge.
@@ -495,7 +495,7 @@ async function runAiTurn(
       console.log(`[chat] 结构动作转换JSON: ${jsonRaw.slice(0, 200)}`)
     }
     let finalRaw = jsonRaw
-    let { bubbles, knowledgeQueries, mood: turnMood, thought: turnThought } = parsedTurn
+    let { bubbles, mood: turnMood, thought: turnThought } = parsedTurn
     const qualityCheckDebug = { enabled: true, repaired: false, reason: undefined as string | undefined, detectedInvalid: false }
     const sourceEventId = history.filter((message) => message.role === 'user').at(-1)?.id
     let assistantEvidenceIds: string[] = []
@@ -517,16 +517,21 @@ async function runAiTurn(
     }
     let logicReview = bubbles.length > 0 ? await runLogicReview('first_quality') : undefined
     if (streamByConversation.get(conversationId) !== streamId) return
-    if (logicReview && !logicReview.valid) {
+    const firstTurnCheck = validatePrivateTurn(bubbles.length, turnRequirement)
+    const firstIssues = [
+      ...(logicReview && !logicReview.valid ? [`客观逻辑错误：${logicReview.reason}`] : []),
+      ...firstTurnCheck.issues,
+    ]
+    if (firstIssues.length > 0) {
       qualityCheckDebug.detectedInvalid = true
-      qualityCheckDebug.reason = logicReview.reason
-      console.warn(`[chat] 逻辑审查要求主模型重写 对方=${displayName(contact)} 原因=${logicReview.reason}`)
+      qualityCheckDebug.reason = firstIssues.join('；')
+      console.warn(`[chat] 硬性验收要求主模型重写 对方=${displayName(contact)} 原因=${qualityCheckDebug.reason}`)
       rawText = await chatCompletion({
         apiKey: settings.apiKey, baseUrl: settings.baseUrl, model: settings.model,
         messages: coalesceConsecutiveRoles([
           ...chatMessages,
           { role: 'assistant', content: rawText },
-          { role: 'user', content: `上一版回复存在客观逻辑错误：${logicReview.reason}\n请依据原始上下文重写完整回复。仍只输出规定的角色纯文本格式，不要解释错误，不要输出JSON。` },
+          { role: 'user', content: `${turnRepairInstruction(firstIssues)}仍只输出规定的角色纯文本格式，不要输出JSON。` },
         ]),
         signal: controller.signal, purpose: proactiveContext ? 'proactive' : 'chat', automatic: !!proactiveContext,
         thinking: 'disabled', maxTokens: proactiveContext ? 900 : 1200, temperature: 0.75,
@@ -543,13 +548,17 @@ async function runAiTurn(
         if (converted.bubbles.length > 0) parsedTurn = converted
       }
       finalRaw = jsonRaw
-      ;({ bubbles, knowledgeQueries, mood: turnMood, thought: turnThought } = parsedTurn)
+      ;({ bubbles, mood: turnMood, thought: turnThought } = parsedTurn)
       qualityCheckDebug.repaired = true
       qualityCheckDebug.detectedInvalid = false
-      logicReview = await runLogicReview('second_quality')
-      if (!logicReview.valid) throw new Error(`主模型重写后仍未通过逻辑审查：${logicReview.reason || '未知原因'}`)
+      logicReview = bubbles.length > 0 ? await runLogicReview('second_quality') : undefined
+      const secondTurnCheck = validatePrivateTurn(bubbles.length, turnRequirement)
+      const secondIssues = [
+        ...(logicReview && !logicReview.valid ? [`客观逻辑错误：${logicReview.reason}`] : []),
+        ...secondTurnCheck.issues,
+      ]
+      if (secondIssues.length > 0) throw new Error(`主模型重写后仍未通过硬性验收：${secondIssues.join('；')}`)
     }
-    knowledgeQueries = []
     if (imageRequestTask) {
       const parsedImage = bubbles.find((bubble): bubble is import('../types').AiBubbleImage => bubble.type === 'image')
       const imageReview = await reviewImageRequest({ task: imageRequestTask, latestUserText: _triggeringUserText, assistantText: rawText, parsedImage, contact, settings, signal: controller.signal, trace: { turnId: streamId, conversationId } })
@@ -580,14 +589,12 @@ async function runAiTurn(
         jsonRaw,
         finalRaw,
         bubbles,
-        knowledgeQueries,
         mood: turnMood,
         thought: turnThought,
         qualityCheck: qualityCheckDebug,
         injectedIntents,
         promptTrace: { sections: [{ label: '世界书', content: worldbookText }, { label: '结构化记忆', content: recentMemories }, { label: '特质规则', content: contact.customPersonalityTraits?.map((trait) => `${trait.name}: ${trait.meaning}`).join('\n') || contact.personalityTrait || '' }, { label: '关系与心情', content: relationshipText }, { label: '日程与当前情境', content: situationText }, { label: '主动话题', content: proactiveContext }].filter((section) => section.content), worldbookMatches: worldbookTrace.matches.map((match) => ({ id: match.entry.id, title: match.entry.title, score: match.score, chars: match.entry.content.length })), memorySummary: recentMemories, traitSummary: contact.customPersonalityTraits?.map((trait) => trait.name).join('、') || contact.personalityTrait, proactiveSource: proactiveContext || undefined },
       }),
-      knowledgeQueries,
       logicTrace: {
         worldVersion: logicBundle.worldVersion,
         locationTreeVersion: logicBundle.worldVersion,
