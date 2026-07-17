@@ -222,10 +222,15 @@ function containsTentativeIntent(text: string, kind: 'outfit' | 'schedule' | 'lo
 
 function hasImmediateLocationCommitment(characterId: string, ownTurnText: string, evidence: StateEvidence[]): boolean {
   if (/现在(?:就)?(?:去|走|出发)|这就(?:去|走|出发)|马上(?:去|走|出发)|已经(?:到|去|出发)|正在(?:去|走|前往)|走{2,}|(?:走|出发)(?:吧|了)|我(?:现在)?去(?:了|啦)/.test(ownTurnText)) return true
-  const userText = evidence.filter((event) => event.actorId === 'user' && event.perceivedBy.includes(characterId)).map((event) => event.content).join('\n')
-  if (/有时候|有时|也许|可能|或许|想(?:去|走)|改天|回头|以后|明天|明晚|今晚|稍后|等会|待会|\b(?:maybe|perhaps|might|someday|tomorrow|later)\b/i.test(userText)) return false
-  const currentRequest = /现在|这就|马上|走[,，！!]?|别.{0,12}(?:待|留).{0,8}(?:去|走)|(?:去|走).{0,12}(?:吧|呗)|\bgo now\b/i.test(userText)
-  const accepted = /(?:^|[，。！？,.!?\s])(?:(?:好|行|可以|成)(?:啊|呀|的|吧)?|没问题|走吧|去吧)(?:$|[，。！？,.!?\s])|我(?:也)?(?:陪你)?去/.test(ownTurnText)
+  const userClauses = evidence
+    .filter((event) => event.actorId === 'user' && event.perceivedBy.includes(characterId))
+    .flatMap((event) => event.content.split(/[；;。！？!?\n]/))
+  const currentRequestClauses = userClauses.filter((clause) =>
+    /现在|这就|马上|先.{0,8}(?:去|走)|走[,，！!]?|别.{0,12}(?:待|留).{0,8}(?:去|走)|(?:去|走).{0,12}(?:吧|呗)|\bgo now\b/i.test(clause)
+    && !/有时候|有时|也许|可能|或许|想(?:去|走)|改天|回头|以后|明天|明晚|今晚|稍后|等会|待会|\b(?:maybe|perhaps|might|someday|tomorrow|later)\b/i.test(clause),
+  )
+  const currentRequest = currentRequestClauses.length > 0
+  const accepted = /(?:^|[，。！？,.!?\s])(?:(?:好+|行+|可以|成)(?:啊|呀|的|吧|嘞)?|没问题|走吧|去吧)(?:$|[，。！？,.!?\s])|我(?:也)?(?:陪你)?去/.test(ownTurnText)
   return currentRequest && accepted && !containsTentativeIntent(ownTurnText, 'location')
 }
 
@@ -254,6 +259,48 @@ function temporalExpectation(text: string, day: number): { day?: number; slot?: 
 
 function normalizeLocationMention(value: string): string {
   return value.toLowerCase().replace(/\s+/g, '').replace(/咖啡(?:店|厅)/g, '咖啡')
+}
+
+function immediateLocationTarget(characterId: string, context: StateValidationContext): string | undefined {
+  const clauses = context.evidence
+    .filter((event) => event.actorId === 'user' && event.perceivedBy.includes(characterId))
+    .flatMap((event) => event.content.split(/[；;。！？!?\n]/))
+    .filter((clause) =>
+      /(?:现在|马上|这就|先|走|别.{0,12}(?:待|留))/.test(clause)
+      && /(?:去|到|前往|客厅|卧室|房间|厨房|餐厅)/.test(clause)
+      && !/(?:有时候|有时|也许|可能|或许|想(?:去|走)|改天|以后|明天|明晚|后天|今晚|稍后|等会|待会)/.test(clause),
+    )
+  const locationIds = new Set<string>()
+  for (const clause of clauses) {
+    const normalizedClause = normalizeLocationMention(clause)
+    for (const location of context.validLocations) {
+      if (clause.includes(location.id) || normalizedClause.includes(normalizeLocationMention(location.name))) locationIds.add(location.id)
+    }
+  }
+  return locationIds.size === 1 ? [...locationIds][0] : undefined
+}
+
+export function recoverDeterministicStateMisses(value: ParsedStateAdjudication, context: StateValidationContext): void {
+  for (const decision of value.decisions) {
+    if (decision.location?.shouldChange !== false) continue
+    const ownEvidence = context.evidence.filter((event) => event.actorId === decision.characterId)
+    if (ownEvidence.length === 0) continue
+    const latestOwnText = ownEvidence.at(-1)?.content ?? ''
+    const ownTurnText = ownEvidence.map((event) => event.content).join('\n')
+    const locationId = immediateLocationTarget(decision.characterId, context)
+    if (
+      !locationId
+      || containsExplicitRefusal(latestOwnText, 'location')
+      || containsTentativeIntent(latestOwnText, 'location')
+      || !hasImmediateLocationCommitment(decision.characterId, ownTurnText, context.evidence)
+    ) continue
+    decision.location = {
+      shouldChange: true,
+      locationId,
+      reason: '确定性证据确认角色已明确承接当前移动请求',
+    }
+    decision.evidenceIds = [...new Set([...(decision.evidenceIds ?? []), ...ownEvidence.map((event) => event.id)])]
+  }
 }
 
 function dimensionChanges(decision: StateDecision, kind: 'outfit' | 'schedule' | 'location'): boolean {
@@ -407,12 +454,12 @@ async function applyDecision(input: StateAdjudicationInput, decision: StateDecis
     if (Object.keys(patch).length > 0 && !samePatch(patch, currentPatch)) {
       const immediate = decision.outfit.timing !== 'future'
       const startDay = immediate ? day : Number(decision.outfit.startDay)
-      const endDay = immediate ? day : Number(decision.outfit.endDay ?? startDay)
+      const requestedEndDay = Number(decision.outfit.endDay ?? day)
+      const endDay = immediate ? Math.max(day, Number.isInteger(requestedEndDay) ? requestedEndDay : day) : requestedEndDay
       if (startDay >= day && endDay >= startDay) {
-        // An outfit action performed in the current conversation is already
-        // true now and remains so for the rest of this world-day. At the first
-        // turn of the next day refreshConstraintsForWorld resolves back to the
-        // immutable defaultOutfit saved at character creation.
+        // An immediate action is true now. If the same evidence also carries a
+        // bounded duration ("戴一周"), preserve that end day instead of
+        // truncating the constraint to today.
         const slots = immediate ? undefined : normalizedSlots(decision.outfit.slots?.filter((value): value is TimeSlot => SLOTS.includes(value)))
         const duplicate = await db.outfitConstraints.where('characterId').equals(contact.id).filter((item) => item.startDay === startDay && item.endDay === endDay && JSON.stringify(item.slots ?? []) === JSON.stringify(slots ?? []) && samePatch(item.patch as Record<string, string>, patch)).first()
         if (!duplicate) {
@@ -501,7 +548,8 @@ ${evidenceText}
 - 描述、疑问、建议、玩笑、拒绝和含糊意向不改状态；角色本人明确接受或明确执行才可改变，不能替别人同意。
 - 任一shouldChange=true都必须至少引用一条actorId等于该characterId的本轮证据。仅仅出现在perceivedBy中表示听见了，不表示同意。
 - 紧跟具体提案的“嗯/好/行/走吧/okay/sure”等无拒绝语义的短回复是明确接受，可结合提案账本确定目标。
-- 现在出发才改location；今晚、明天、稍后等只写schedule。未来日程一旦被接受应立即登记，但不能提前移动。
+- 现在出发才改location；今晚、明天、稍后等只写schedule。对当前移动请求回复“好嘞，去客厅”“行，走吧”等，已经表示现在开始执行，location应立即改变，不得额外要求角色再说“已经走到/实际移动了”。
+- 未来日程一旦被接受应立即登记，但不能提前移动。“明晚/今晚/明早”等本身已经是足够的粗粒度slots；地点和日期明确时，角色接受后追问“几点”不影响约定成立，不得仅因缺少具体钟点而改成pending或shouldChange=false。
 - 穿上、脱下、更换才改outfit。立即执行timing=immediate；未来或持续穿戴timing=future。脱掉写对应字段为“无”。
 - 照片、自拍、相册、旧照、画面或回忆中的衣着不代表现实衣着，除非角色另有明确的现实穿脱动作。
 - 配饰统一写accessories（蝴蝶结、发箍、发卡、首饰、围巾、领带、手表、眼镜）；持续七天戴配饰仍是outfit，不是schedule。
@@ -660,6 +708,7 @@ ${evidenceText}
   })
   let raw = await requestAdjudication([{ role: 'system', content: prompt }, { role: 'user', content: '审查并裁决当前回合。' }], 'state')
   let parsedResult = parseStateAdjudication(raw)
+  if (parsedResult.value) recoverDeterministicStateMisses(parsedResult.value, validationContext)
   let validationIssues = [
     ...parsedResult.issues,
     ...(parsedResult.value ? validateStateAdjudication(parsedResult.value, validationContext) : []),
@@ -674,6 +723,7 @@ ${evidenceText}
       { role: 'user', content: `上一版状态裁决未通过确定性校验：\n${issueText}\n请重新输出完整JSON。不得解释，不得省略任何候选角色或三个状态维度；没有变化必须明确shouldChange=false。` },
     ], 'state_retry')
     parsedResult = parseStateAdjudication(raw)
+    if (parsedResult.value) recoverDeterministicStateMisses(parsedResult.value, validationContext)
     validationIssues = [
       ...parsedResult.issues,
       ...(parsedResult.value ? validateStateAdjudication(parsedResult.value, validationContext) : []),

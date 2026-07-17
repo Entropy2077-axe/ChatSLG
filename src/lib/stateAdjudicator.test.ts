@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { parseStateAdjudication, validateStateAdjudication, type StateValidationContext } from './stateAdjudicator'
+import { parseStateAdjudication, recoverDeterministicStateMisses, validateStateAdjudication, type StateValidationContext } from './stateAdjudicator'
 
 const context = (evidence: StateValidationContext['evidence']): StateValidationContext => ({
   characterIds: ['alice'],
@@ -94,6 +94,39 @@ describe('state adjudication parsing and deterministic validation', () => {
       { id: 'a1', actorId: 'alice', actorName: '林夏', content: '行啊，去客厅', perceivedBy: ['alice'] },
       { id: 'a2', actorId: 'alice', actorName: '林夏', content: '明晚咖啡厅见，我会戴蝴蝶结', perceivedBy: ['alice'] },
     ]))).toEqual([])
+  })
+
+  it('treats colloquial acceptance as starting the requested move without requiring a second completion sentence', () => {
+    const accepted = parsedDecision({
+      location: { shouldChange: true, locationId: 'living', reason: '接受当前请求' },
+    })
+    expect(validateStateAdjudication(accepted.value!, context([
+      { id: 'u1', actorId: 'user', actorName: '用户', content: '走，先去客厅。', perceivedBy: ['alice'] },
+      { id: 'a1', actorId: 'alice', actorName: '林夏', content: '好嘞，去客厅。', perceivedBy: ['alice'] },
+    ]))).toEqual([])
+  })
+
+  it('recovers a model location miss only from an unambiguous current request and the character own acceptance', () => {
+    const missed = parsedDecision({
+      location: { shouldChange: false, locationId: 'living', reason: '模型要求后续执行句' },
+    })
+    const current = context([
+      { id: 'u1', actorId: 'user', actorName: '用户', content: '走，先去客厅；明晚咖啡厅见。', perceivedBy: ['alice'] },
+      { id: 'a1', actorId: 'alice', actorName: '林夏', content: '行行行，去客厅。', perceivedBy: ['alice'] },
+    ])
+    recoverDeterministicStateMisses(missed.value!, current)
+    expect(missed.value?.decisions[0].location).toMatchObject({ shouldChange: true, locationId: 'living' })
+    expect(missed.value?.decisions[0].evidenceIds).toContain('a1')
+
+    const wish = parsedDecision({
+      location: { shouldChange: false, locationId: 'living', reason: '只是愿望' },
+    })
+    const tentative = context([
+      { id: 'u1', actorId: 'user', actorName: '用户', content: '有时候想去客厅。', perceivedBy: ['alice'] },
+      { id: 'a1', actorId: 'alice', actorName: '林夏', content: '想去就去呗。', perceivedBy: ['alice'] },
+    ])
+    recoverDeterministicStateMisses(wish.value!, tentative)
+    expect(wish.value?.decisions[0].location?.shouldChange).toBe(false)
   })
 
   it('anchors tomorrow evening and seven-day outfit constraints while preserving all three dimensions', () => {

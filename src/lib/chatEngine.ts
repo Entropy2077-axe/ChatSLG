@@ -20,8 +20,7 @@ import { buildLogicContext, formatActionContext, formatLogicContext } from './lo
 import { adjudicateStateChanges } from './stateAdjudicator'
 import { reviewTurnLogic } from './turnLogicReviewer'
 import { isWorldPhoneAvailable } from './schedule'
-import { chatLivelinessRule } from './chatLiveliness'
-import { privateTurnRequirement, turnRepairInstruction, validatePrivateTurn } from './turnRequirements'
+import { privateTurnRequirement, turnRepairInstruction, turnRequirementReplyCountRule, validatePrivateTurn } from './turnRequirements'
 import { ensureWorldInitialized, resolveSchedule } from './world'
 import type { AiBubble, AppSettings, Contact, Message, MessageType, Sticker } from '../types'
 import { messagesForAiTurn, recentConversationMessages } from './conversationStats'
@@ -394,6 +393,7 @@ async function runAiTurn(
     // Image availability is irrelevant on ordinary turns. Avoid scanning all
     // historical Atlas assets unless this turn has an actual image request.
     const imageAvailable = imageRequestTask ? await atlasQuotaAvailable(settings) : false
+    const turnRequirement = privateTurnRequirement(settings.chatLiveliness, _triggeringUserText)
     const contextSections = buildRawChatPrompt({
       name: contact.name,
       persona: `${contact.systemPrompt}${customPersonalityTraitsLine(contact.customPersonalityTraits)}${isModuleEnabled('career') && contact.occupation ? `\n当前职业：${contact.occupation}，现实月薪：${contact.monthlySalary ?? 0}。工作会真实影响你的作息和日常话题。` : ''}${financeContext}`,
@@ -423,11 +423,10 @@ async function runAiTurn(
       mbti: contact.mbti || undefined,
       recentMemoriesText: recentMemories || undefined,
       speechSamplesText: formatSpeechSamplesForScene(contact.speechSamples, 'private', 3) || undefined,
-      replyCountRule: chatLivelinessRule(settings.chatLiveliness),
+      replyCountRule: turnRequirementReplyCountRule(turnRequirement),
     })
 
     const recentHistory = history.slice(-CONTEXT_WINDOW_SIZE)
-    const turnRequirement = privateTurnRequirement(settings.chatLiveliness)
     const chatMessages: ChatMessage[] = coalesceConsecutiveRoles([
       // Stable persona/style comes first so DeepSeek's prefix cache can match
       // before the per-turn world state and cross-scene records diverge.

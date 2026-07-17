@@ -107,4 +107,30 @@ describe('state application receipts and shared appointments', () => {
     expect(await db.outfitConstraints.where('characterId').equals('a').count()).toBe(1)
     expect((await db.contacts.get('b'))?.currentLocationId).toBeUndefined()
   })
+
+  it('preserves a bounded duration when an outfit is put on immediately', async () => {
+    const world = await db.worldState.get('global')
+    const extended: StateDecision = {
+      characterId: 'a',
+      evidenceIds: ['ea'],
+      outfit: {
+        shouldChange: true,
+        timing: 'immediate',
+        patch: { accessories: '蝴蝶结' },
+        startDay: world!.day,
+        endDay: world!.day + 6,
+        reason: '现在戴上并持续一周',
+      },
+      schedule: { shouldChange: false },
+      location: { shouldChange: false },
+    }
+    const receipts = await commitStateAdjudication(
+      { ...input('ca', 'a', 'ea'), evidence: [{ id: 'ea', actorId: 'a', actorName: 'A', content: '现在戴上，一周都戴着', perceivedBy: ['a'] }] },
+      result(world!.worldVersion, world!.day, extended),
+    )
+    expect(receipts).toEqual(expect.arrayContaining([expect.objectContaining({ kind: 'outfit', status: 'applied' })]))
+    const constraint = await db.outfitConstraints.where('characterId').equals('a').first()
+    expect(constraint).toMatchObject({ startDay: world!.day, endDay: world!.day + 6, patch: { accessories: '蝴蝶结' } })
+    expect((await db.contacts.get('a'))?.outfit?.accessories).toBe('蝴蝶结')
+  })
 })

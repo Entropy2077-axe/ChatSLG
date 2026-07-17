@@ -33,6 +33,8 @@ describe('private chat logical grounding prompt', () => {
     expect(prompt).toContain('先识别最新话语是在请求、邀请、提问，还是陈述已经发生的事实')
     expect(prompt).toContain('如果人设硬事实明确表示会配合这类请求，就必须按人设清楚接受并落实')
     expect(prompt).toContain('如果人设或情境确有理由拒绝')
+    expect(prompt).toContain('现有硬事实没有写明缺失或不可用时')
+    expect(prompt).toContain('不得临时编造“我没有这件东西”')
     expect(prompt).toContain('一条消息里有多个并列请求或约定时，逐项理解和回应')
     expect(prompt).toContain('“要不/也许/有时候想/以后再说”只是试探、愿望或建议')
   })

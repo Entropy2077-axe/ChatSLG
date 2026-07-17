@@ -1,14 +1,14 @@
-<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>ChatSLG AI Test Report</title><style>body{font:14px/1.6 system-ui;margin:0;background:#f4f4f6;color:#171717}.wrap{max-width:1100px;margin:auto;padding:24px}.card{background:#fff;border-radius:14px;padding:18px;margin:12px 0;overflow:auto}h1,h2{margin:.2em 0 .7em}table{border-collapse:collapse;width:100%}th,td{border-bottom:1px solid #eee;padding:8px;text-align:left}pre{white-space:pre-wrap;font:12px/1.5 ui-monospace;background:#fafafa;padding:14px;border-radius:10px}</style></head><body><main class="wrap"><h1>ChatSLG AI 回归测试报告</h1><section class="card"><table><tbody><tr><th>生成时间</th><td>2026-07-17T09:26:33.785Z</td></tr><tr><th>真实 / Mock</th><td>2 / 0</td></tr><tr><th>完全通过率</th><td>100.0%</td></tr><tr><th>隔离数据库</th><td>chatslg-ai-eval-cli-1784280379272</td></tr></tbody></table></section><section class="card"><h2>逐次结果</h2><table><thead><tr><th>场景</th><th>模式</th><th>状态</th><th>气泡</th><th>发言人</th><th>失败类型</th><th>耗时</th></tr></thead><tbody><tr><td>acceptance-e2e-photo-negative</td><td>real</td><td>passed</td><td>2</td><td>1</td><td>none</td><td>6833 ms</td></tr><tr><td>acceptance-e2e-photo-negative</td><td>real</td><td>passed</td><td>2</td><td>1</td><td>none</td><td>6368 ms</td></tr></tbody></table></section><section class="card"><h2>完整 Markdown 报告</h2><pre># ChatSLG AI 回归测试报告
+# ChatSLG AI 回归测试报告
 
-&gt; 本报告只陈述当前样本中观察到的结果。样本量不足时不据此宣称达到 99%。
+> 本报告只陈述当前样本中观察到的结果。样本量不足时不据此宣称达到 99%。
 
 ## 测试信息
 
-- 测试日期：2026-07-17T09:26:33.785Z
+- 测试日期：2026-07-17T09:24:12.587Z
 - 代码/应用版本：0.1.33 / 5c58607
 - 主模型：deepseek-v4-pro
 - Utility 模型：deepseek-v4-flash
-- 测试数据库：chatslg-ai-eval-cli-1784280379272（隔离=是）
+- 测试数据库：chatslg-ai-eval-cli-1784280146585（隔离=是）
 - 随机种子：模型接口未提供固定随机种子；重复运行用于观察波动。
 - 核心聊天逻辑是否修改：是
 
@@ -16,15 +16,15 @@
 
 | 指标 | 数值 |
 | --- | ---: |
-| 总运行次数 | 2 |
-| 实际执行次数 | 2 |
+| 总运行次数 | 13 |
+| 实际执行次数 | 13 |
 | 因配置阻塞次数 | 0 |
-| 真实模型运行次数 | 2 |
-| 真实模型完全通过 | 2 |
-| 真实模型首次直接通过率 | 100.0% |
+| 真实模型运行次数 | 13 |
+| 真实模型完全通过 | 13 |
+| 真实模型首次直接通过率 | 53.8% |
 | 真实模型修复后最终通过率 | 100.0% |
-| 发生修复/重试的比例 | 0.0% |
-| 修复/重试救回率 | 0.0% |
+| 发生修复/重试的比例 | 46.2% |
+| 修复/重试救回率 | 100.0% |
 | 完整端到端通过率 | 100.0% |
 | 直接裁决器通过率 | 0.0% |
 | 独立验收集通过率 | 100.0% |
@@ -35,17 +35,17 @@
 | 回复格式成功率 | 100.0% |
 | 热闹度条数达标率 | 0.0% |
 | 多人参与率 | 0.0% |
-| 衣着状态召回率 | 0.0% |
+| 衣着状态召回率 | 100.0% |
 | 衣着误触发率 | 0.0% |
-| 日程状态召回率 | 0.0% |
+| 日程状态召回率 | 100.0% |
 | 日程误触发率 | 0.0% |
-| 地点状态召回率 | 0.0% |
+| 地点状态召回率 | 100.0% |
 | 地点误触发率 | 0.0% |
-| 多状态同时提交成功率 | 0.0% |
+| 多状态同时提交成功率 | 100.0% |
 | 数据库提交成功率 | 100.0% |
-| 平均耗时 | 6601 ms |
-| P50 / P95 | 6368 ms / 6833 ms |
-| 平均模型调用次数 | 3.00 |
+| 平均耗时 | 8054 ms |
+| P50 / P95 | 7869 ms / 11249 ms |
+| 平均模型调用次数 | 3.62 |
 
 
 
@@ -53,13 +53,21 @@
 
 | 分类 | 运行 | 通过 | 成功率 |
 | --- | ---: | ---: | ---: |
-| outfit | 2 | 2 | 100.0% |
+| outfit | 4 | 4 | 100.0% |
+| schedule | 2 | 2 | 100.0% |
+| location | 4 | 4 | 100.0% |
+| multi_state | 3 | 3 | 100.0% |
 
 ## 场景列表
 
 | 场景ID | 分类 | 测试集 | 覆盖层级 | 模式 | 默认重复 | 说明 |
 | --- | --- | --- | --- | --- | ---: | --- |
+| acceptance-e2e-outfit-colloquial | outfit | 独立验收 | end_to_end | 真实模型 | 2 | 未参与规则修复的口语化衣着请求，完整经过私聊与状态提交。 |
+| acceptance-e2e-schedule-colloquial | schedule | 独立验收 | end_to_end | 真实模型 | 2 | 口语化未来约定必须经过真实回复后写入日程，不能提前移动。 |
+| acceptance-e2e-location-colloquial | location | 独立验收 | end_to_end | 真实模型 | 2 | 口语化立即移动请求经过完整生产链路后更新当前位置。 |
 | acceptance-e2e-photo-negative | outfit | 独立验收 | end_to_end | 真实模型 | 2 | 真实聊天中谈到旧照片衣着不得污染现实衣着。 |
+| acceptance-e2e-ambiguous-negative | location | 独立验收 | end_to_end | 真实模型 | 2 | 含糊愿望经过真实聊天后不得被当成立即行动。 |
+| acceptance-e2e-multi-state-colloquial | multi_state | 独立验收 | end_to_end | 真实模型 | 3 | 未见口语表达同时覆盖立即移动、持续衣着和未来日程。 |
 
 ## 失败案例摘要
 
@@ -83,4 +91,3 @@
 ## 后续对比方法
 
 保持场景ID、模型、数据库隔离方式和重复次数不变，从“天眼 → AI测试台”运行全部场景。导出JSON后按 scenarioId + repetition 比较硬断言、失败类型、数据库最终状态、模型调用数和P50/P95耗时。Mock结果不得与真实模型成功率混算。
-</pre></section></main></body></html>
