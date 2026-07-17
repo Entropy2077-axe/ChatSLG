@@ -1,6 +1,7 @@
 import { v4 as uuid } from 'uuid'
 import { db } from '../db/db'
 import type { AdminAiTraceStage, AiUsagePurpose } from '../types'
+import { observeAiEvalCall } from './aiEval/observer'
 import { assertAutomaticAiBudget, estimateTokens, recordAiUsage } from './aiUsage'
 import { useSettingsStore } from '../store/useSettingsStore'
 
@@ -191,6 +192,16 @@ export async function chatCompletion(opts: ChatCompletionOptions): Promise<strin
   for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
     if (opts.signal?.aborted) throw new DOMException('Aborted', 'AbortError')
     const { signal, cleanup } = linkedTimeoutSignal(opts.signal, opts.timeoutMs ?? defaults.timeoutMs)
+    const observedId = crypto.randomUUID()
+    const observedStartedAt = Date.now()
+    observeAiEvalCall({
+      id: observedId,
+      service: 'model',
+      model: opts.model,
+      purpose,
+      stage: opts.trace?.stage,
+      startedAt: observedStartedAt,
+    })
     try {
       const res = await fetch(`${normalizeBaseUrl(opts.baseUrl)}/v1/chat/completions`, {
         method: 'POST',
@@ -209,6 +220,18 @@ export async function chatCompletion(opts: ChatCompletionOptions): Promise<strin
       })
 
       if (!res.ok) {
+        observeAiEvalCall({
+          id: observedId,
+          service: 'model',
+          model: opts.model,
+          purpose,
+          stage: opts.trace?.stage,
+          startedAt: observedStartedAt,
+          finishedAt: Date.now(),
+          status: res.status,
+          success: false,
+          error: `HTTP ${res.status}`,
+        })
         const text = await res.text()
         const error = new Error(`API请求失败 HTTP ${res.status}: ${text.slice(0, 300)}`)
         if (RETRYABLE_STATUS.has(res.status) && attempt < MAX_ATTEMPTS - 1) {
@@ -239,6 +262,17 @@ export async function chatCompletion(opts: ChatCompletionOptions): Promise<strin
         throw new Error(labels[finishReason] ?? `API返回未正常结束: ${finishReason}`)
       }
       if (typeof content !== 'string' || !content.trim()) throw new Error('API返回内容为空或格式异常')
+      observeAiEvalCall({
+        id: observedId,
+        service: 'model',
+        model: opts.model,
+        purpose,
+        stage: opts.trace?.stage,
+        startedAt: observedStartedAt,
+        finishedAt: Date.now(),
+        status: res.status,
+        success: true,
+      })
 
       const usage = json?.usage ?? {}
       const promptTokens = Number(usage.prompt_tokens)
@@ -268,6 +302,17 @@ export async function chatCompletion(opts: ChatCompletionOptions): Promise<strin
       cleanup()
       return content
     } catch (error) {
+      observeAiEvalCall({
+        id: observedId,
+        service: 'model',
+        model: opts.model,
+        purpose,
+        stage: opts.trace?.stage,
+        startedAt: observedStartedAt,
+        finishedAt: Date.now(),
+        success: false,
+        error: error instanceof Error ? error.message : String(error),
+      })
       cleanup()
       if (error instanceof DOMException && error.name === 'AbortError') {
         if (opts.signal?.aborted) throw error

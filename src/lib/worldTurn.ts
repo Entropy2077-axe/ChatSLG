@@ -581,7 +581,7 @@ ${evidenceText}
       }
       await archiveSceneConversationsForStep(world.step, world.day, world.slot, now)
       await db.aiTurns.add({
-        id: uuid(), conversationId: `world-turn:${next.step}`, raw, parsed, knowledgeQueries: [],
+        id: uuid(), conversationId: `world-turn:${next.step}`, raw, parsed,
         logicTrace: {
           worldVersion: world.worldVersion, locationTreeVersion: world.worldVersion,
           personaSummaries: contacts.map((contact) => contact.systemPrompt.slice(0, 500)),

@@ -111,7 +111,7 @@ async function seedSearchAndGroupFixture(page: Page) {
     await db.aiTurns.add({
       id: 'turn-a',
       conversationId: 'conversation-a',
-      raw: '{"messages":[{"type":"text","content":"first bubble"},{"type":"text","content":"second bubble"}],"knowledgeQueries":["nebula"]}',
+      raw: '{"messages":[{"type":"text","content":"first bubble"},{"type":"text","content":"second bubble"}]}',
       parsed: {
         rawText: 'first bubble\nsecond bubble',
         conversionParsed: {
@@ -119,7 +119,6 @@ async function seedSearchAndGroupFixture(page: Page) {
             { type: 'text', content: 'first bubble' },
             { type: 'text', content: 'second bubble' },
           ],
-          knowledgeQueries: ['nebula'],
         },
         parsedBubbles: [
           { type: 'text', content: 'first bubble' },
@@ -130,9 +129,7 @@ async function seedSearchAndGroupFixture(page: Page) {
         validator: { enabled: true, mode: 'quality', repaired: false, optimized: false },
         injectedIntents: [{ text: 'ask about tomorrow', kind: 'follow_up', confidence: 90 }],
         memoryUpdate: { addedIntents: [{ text: 'ask about tomorrow', kind: 'follow_up', confidence: 90 }] },
-        knowledgeQueries: ['nebula'],
       },
-      knowledgeQueries: ['nebula'],
       createdAt: 9,
     })
     await db.messages.update('message-a', { debugAiTurnId: 'turn-a' })
@@ -286,8 +283,8 @@ test('sky-eye never renders configured api keys', async ({ page }) => {
   // Raw values must never appear
   await expect(body).not.toContainText('sk-visible-bug')
   await expect(body).not.toContainText('pexels-visible-bug')
-  // Key names should be present
-  await expect(body).toContainText('Console')
+  // The diagnostics shell must render without exposing any settings dump.
+  await expect(body).toContainText('日志')
   /* legacy settings-dump assertion intentionally retired: Sky Eye no longer renders settings. */
   if (process.env.SKIP_LEGACY_TESTS === '1') {
   // Redacted placeholder must appear for configured keys
@@ -335,7 +332,7 @@ test('plain-text image acceptance submits Atlas and completes the pending image 
   await page.route('**/v1/chat/completions', async (route) => {
     const body = route.request().postDataJSON() as { messages?: Array<{ content?: string }>; response_format?: unknown }
     const prompt = (body.messages ?? []).map((message) => message.content ?? '').join('\n')
-    let content = '好，我现在拍给你。'
+    let content = '<thought>我愿意现在拍给他看</thought>好，我现在拍给你。\n<thought>我得真的发出图片而不是只描述</thought>[image:selfie:portrait:normal:自然光下的随手自拍]\n<thought>希望他会喜欢这张照片</thought>拍好了，你看看。\n<mood>😊</mood>'
     if (prompt.includes('"decision":"accept|reject|defer"')) {
       const taskId = prompt.match(/"taskId":"([^"]+)"/)?.[1] ?? ''
       content = JSON.stringify({ taskId, decision: 'accept', kind: 'selfie', aspectRatio: 'portrait', sensitive: false, scene: '自然光下的随手自拍', reason: '角色明确同意现在发送' })
@@ -437,6 +434,7 @@ test('admin mode can expand persisted ai trace payload in sky-eye', async ({ pag
     await db.adminAiTraces.add({ id: 'trace-e2e', purpose: 'chat', model: 'test-model', messages: [{ role: 'system', content: 'prompt context' }], output: 'second bubble', inputTokens: 1, outputTokens: 1, createdAt: Date.now() })
   })
   await page.goto('/#/sky-eye')
+  await page.getByRole('button', { name: '调用' }).click()
   await page.getByText('chat · test-model').click()
   await expect(page.getByText('second bubble').first()).toBeVisible()
   await expect(page.getByText('prompt context').first()).toBeVisible()

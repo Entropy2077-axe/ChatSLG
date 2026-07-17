@@ -67,8 +67,8 @@ export class ChatSLGDB extends Dexie {
   mediaAssets!: Table<MediaAsset, string>
   imageRequests!: Table<ImageRequestTask, string>
 
-  constructor() {
-    super('chatslg-db')
+  constructor(name = 'chatslg-db') {
+    super(name)
     this.version(1).stores({
       contacts: 'id, name, createdAt',
       conversations: 'id, contactId, updatedAt, pinned',
@@ -309,4 +309,15 @@ export class ChatSLGDB extends Dexie {
   }
 }
 
-export const db = new ChatSLGDB()
+const evalDatabaseName = typeof window !== 'undefined'
+  ? new URLSearchParams(window.location.search).get('__aiEvalDb')
+  : null
+
+/**
+ * AI regression runs load the application with an explicit, per-session
+ * database name. IndexedDB contents in the user's normal `chatslg-db`
+ * database are therefore never visible to (or writable by) the evaluator.
+ */
+export const db = new ChatSLGDB(evalDatabaseName?.startsWith('chatslg-ai-eval-') ? evalDatabaseName : 'chatslg-db')
+
+export const isAiEvalDatabase = db.name.startsWith('chatslg-ai-eval-')

@@ -63,4 +63,74 @@ describe('state application receipts and shared appointments', () => {
     expect(new Set(planned[0].acceptedParticipantIds)).toEqual(new Set(['a', 'b']))
     expect(new Set(planned[0].conversationIds)).toEqual(new Set(['ca', 'cb']))
   })
+
+  it('rejects a silent listener while preserving another character valid independent dimension', async () => {
+    const world = await db.worldState.get('global')
+    const mixedInput: StateAdjudicationInput = {
+      scene: 'scene',
+      conversationId: 'ca',
+      characterIds: ['a', 'b'],
+      settings,
+      evidence: [
+        { id: 'ea', actorId: 'a', actorName: 'A', content: '好，我现在戴上蝴蝶结', perceivedBy: ['a', 'b'] },
+        { id: 'eu', actorId: 'user', actorName: '用户', content: '你们都去客厅吧', perceivedBy: ['a', 'b'] },
+      ],
+    }
+    const mixedResult: StateAdjudicationResult = {
+      review: { valid: true, reason: '' },
+      worldVersion: world!.worldVersion,
+      day: world!.day,
+      pendingIntents: [],
+      receipts: [],
+      decisions: [
+        {
+          characterId: 'a',
+          evidenceIds: ['ea'],
+          outfit: { shouldChange: true, timing: 'immediate', patch: { accessories: '蝴蝶结' }, reason: '本人明确执行' },
+          schedule: { shouldChange: false },
+          location: { shouldChange: false },
+        },
+        {
+          characterId: 'b',
+          evidenceIds: ['eu'],
+          outfit: { shouldChange: false },
+          schedule: { shouldChange: false },
+          location: { shouldChange: true, locationId: 'home-living', reason: '用户提议' },
+        },
+      ],
+    }
+    const receipts = await commitStateAdjudication(mixedInput, mixedResult)
+    expect(receipts).toEqual(expect.arrayContaining([
+      expect.objectContaining({ characterId: 'a', kind: 'outfit', status: 'applied' }),
+      expect.objectContaining({ characterId: 'b', kind: 'location', status: 'rejected' }),
+    ]))
+    expect(await db.outfitConstraints.where('characterId').equals('a').count()).toBe(1)
+    expect((await db.contacts.get('b'))?.currentLocationId).toBeUndefined()
+  })
+
+  it('preserves a bounded duration when an outfit is put on immediately', async () => {
+    const world = await db.worldState.get('global')
+    const extended: StateDecision = {
+      characterId: 'a',
+      evidenceIds: ['ea'],
+      outfit: {
+        shouldChange: true,
+        timing: 'immediate',
+        patch: { accessories: '蝴蝶结' },
+        startDay: world!.day,
+        endDay: world!.day + 6,
+        reason: '现在戴上并持续一周',
+      },
+      schedule: { shouldChange: false },
+      location: { shouldChange: false },
+    }
+    const receipts = await commitStateAdjudication(
+      { ...input('ca', 'a', 'ea'), evidence: [{ id: 'ea', actorId: 'a', actorName: 'A', content: '现在戴上，一周都戴着', perceivedBy: ['a'] }] },
+      result(world!.worldVersion, world!.day, extended),
+    )
+    expect(receipts).toEqual(expect.arrayContaining([expect.objectContaining({ kind: 'outfit', status: 'applied' })]))
+    const constraint = await db.outfitConstraints.where('characterId').equals('a').first()
+    expect(constraint).toMatchObject({ startDay: world!.day, endDay: world!.day + 6, patch: { accessories: '蝴蝶结' } })
+    expect((await db.contacts.get('a'))?.outfit?.accessories).toBe('蝴蝶结')
+  })
 })

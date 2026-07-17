@@ -32,6 +32,7 @@ const WorkPage = page(() => import('./pages/WorkPage'), 'WorkPage')
 const InterviewPage = page(() => import('./pages/InterviewPage'), 'InterviewPage')
 const SaveLoadPage = page(() => import('./pages/SaveLoadPage'), 'SaveLoadPage')
 const SkyEyePage = page(() => import('./pages/SkyEyePage'), 'SkyEyePage')
+const AiEvalPage = page(() => import('./pages/AiEvalPage'), 'AiEvalPage')
 const SocialInboxPage = page(() => import('./pages/SocialInboxPage'), 'SocialInboxPage')
 const SceneArchivePage = page(() => import('./pages/SceneArchivePage'), 'SceneArchivePage')
 const TimePage = page(() => import('./pages/TimePage'), 'TimePage')
@@ -136,6 +137,9 @@ function App() {
         <Route path="/save-load" element={<SaveLoadPage />} />
         {adminModeEnabled && (
           <Route path="/sky-eye" element={<SkyEyePage />} />
+        )}
+        {(adminModeEnabled || import.meta.env.DEV) && (
+          <Route path="/ai-eval" element={<AiEvalPage />} />
         )}
         <Route path="*" element={<Navigate to="/phone" replace />} />
         </Routes>

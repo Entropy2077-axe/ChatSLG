@@ -33,7 +33,7 @@ export async function generateScheduleAdaptation(characterId: string, settings: 
   })
   if (slots.size !== 4) throw new Error('基础日程必须完整覆盖四个时段')
   await db.aiTurns.add({
-    id: uuid(), conversationId: `schedule-adaptation:${characterId}`, raw, parsed, knowledgeQueries: [],
+    id: uuid(), conversationId: `schedule-adaptation:${characterId}`, raw, parsed,
     logicTrace: {
       worldVersion: bundle.worldVersion, locationTreeVersion: bundle.worldVersion,
       personaSummaries: [bundle.subject.character.systemPrompt.slice(0, 500)],

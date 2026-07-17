@@ -20,7 +20,7 @@ import { buildLogicContext, formatActionContext, formatLogicContext } from './lo
 import { adjudicateStateChanges } from './stateAdjudicator'
 import { reviewTurnLogic } from './turnLogicReviewer'
 import { isWorldPhoneAvailable } from './schedule'
-import { chatLivelinessRule } from './chatLiveliness'
+import { privateTurnRequirement, turnRepairInstruction, turnRequirementReplyCountRule, validatePrivateTurn } from './turnRequirements'
 import { ensureWorldInitialized, resolveSchedule } from './world'
 import type { AiBubble, AppSettings, Contact, Message, MessageType, Sticker } from '../types'
 import { messagesForAiTurn, recentConversationMessages } from './conversationStats'
@@ -162,14 +162,13 @@ function parseAiTurnDebugPayload(opts: {
   jsonRaw: string
   finalRaw: string
   bubbles: AiBubble[]
-  knowledgeQueries: string[]
   mood?: string
   thought?: string
   qualityCheck: { enabled: boolean; repaired: boolean; reason?: string; detectedInvalid?: boolean }
   injectedIntents: ReturnType<typeof activeIntents>
   promptTrace?: import('../types').PromptTrace
 }): unknown {
-  const { mainPrompt, conversionPrompt, finalRaw, jsonRaw, rawText, bubbles, knowledgeQueries, mood, thought, qualityCheck, injectedIntents, promptTrace } = opts
+  const { mainPrompt, conversionPrompt, finalRaw, jsonRaw, rawText, bubbles, mood, thought, qualityCheck, injectedIntents, promptTrace } = opts
   const trimmed = finalRaw.trim()
   const fenceMatch = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/i)
   const text = fenceMatch ? fenceMatch[1].trim() : trimmed
@@ -197,7 +196,6 @@ function parseAiTurnDebugPayload(opts: {
     qualityCheck,
     mood,
     thought,
-    knowledgeQueries,
     injectedIntents,
     memoryUpdate: null,
     promptTrace,
@@ -395,6 +393,7 @@ async function runAiTurn(
     // Image availability is irrelevant on ordinary turns. Avoid scanning all
     // historical Atlas assets unless this turn has an actual image request.
     const imageAvailable = imageRequestTask ? await atlasQuotaAvailable(settings) : false
+    const turnRequirement = privateTurnRequirement(settings.chatLiveliness, _triggeringUserText)
     const contextSections = buildRawChatPrompt({
       name: contact.name,
       persona: `${contact.systemPrompt}${customPersonalityTraitsLine(contact.customPersonalityTraits)}${isModuleEnabled('career') && contact.occupation ? `\n当前职业：${contact.occupation}，现实月薪：${contact.monthlySalary ?? 0}。工作会真实影响你的作息和日常话题。` : ''}${financeContext}`,
@@ -424,7 +423,7 @@ async function runAiTurn(
       mbti: contact.mbti || undefined,
       recentMemoriesText: recentMemories || undefined,
       speechSamplesText: formatSpeechSamplesForScene(contact.speechSamples, 'private', 3) || undefined,
-      replyCountRule: chatLivelinessRule(settings.chatLiveliness),
+      replyCountRule: turnRequirementReplyCountRule(turnRequirement),
     })
 
     const recentHistory = history.slice(-CONTEXT_WINDOW_SIZE)
@@ -495,7 +494,7 @@ async function runAiTurn(
       console.log(`[chat] 结构动作转换JSON: ${jsonRaw.slice(0, 200)}`)
     }
     let finalRaw = jsonRaw
-    let { bubbles, knowledgeQueries, mood: turnMood, thought: turnThought } = parsedTurn
+    let { bubbles, mood: turnMood, thought: turnThought } = parsedTurn
     const qualityCheckDebug = { enabled: true, repaired: false, reason: undefined as string | undefined, detectedInvalid: false }
     const sourceEventId = history.filter((message) => message.role === 'user').at(-1)?.id
     let assistantEvidenceIds: string[] = []
@@ -517,16 +516,21 @@ async function runAiTurn(
     }
     let logicReview = bubbles.length > 0 ? await runLogicReview('first_quality') : undefined
     if (streamByConversation.get(conversationId) !== streamId) return
-    if (logicReview && !logicReview.valid) {
+    const firstTurnCheck = validatePrivateTurn(bubbles.length, turnRequirement)
+    const firstIssues = [
+      ...(logicReview && !logicReview.valid ? [`客观逻辑错误：${logicReview.reason}`] : []),
+      ...firstTurnCheck.issues,
+    ]
+    if (firstIssues.length > 0) {
       qualityCheckDebug.detectedInvalid = true
-      qualityCheckDebug.reason = logicReview.reason
-      console.warn(`[chat] 逻辑审查要求主模型重写 对方=${displayName(contact)} 原因=${logicReview.reason}`)
+      qualityCheckDebug.reason = firstIssues.join('；')
+      console.warn(`[chat] 硬性验收要求主模型重写 对方=${displayName(contact)} 原因=${qualityCheckDebug.reason}`)
       rawText = await chatCompletion({
         apiKey: settings.apiKey, baseUrl: settings.baseUrl, model: settings.model,
         messages: coalesceConsecutiveRoles([
           ...chatMessages,
           { role: 'assistant', content: rawText },
-          { role: 'user', content: `上一版回复存在客观逻辑错误：${logicReview.reason}\n请依据原始上下文重写完整回复。仍只输出规定的角色纯文本格式，不要解释错误，不要输出JSON。` },
+          { role: 'user', content: `${turnRepairInstruction(firstIssues)}仍只输出规定的角色纯文本格式，不要输出JSON。` },
         ]),
         signal: controller.signal, purpose: proactiveContext ? 'proactive' : 'chat', automatic: !!proactiveContext,
         thinking: 'disabled', maxTokens: proactiveContext ? 900 : 1200, temperature: 0.75,
@@ -543,13 +547,21 @@ async function runAiTurn(
         if (converted.bubbles.length > 0) parsedTurn = converted
       }
       finalRaw = jsonRaw
-      ;({ bubbles, knowledgeQueries, mood: turnMood, thought: turnThought } = parsedTurn)
+      ;({ bubbles, mood: turnMood, thought: turnThought } = parsedTurn)
       qualityCheckDebug.repaired = true
       qualityCheckDebug.detectedInvalid = false
-      logicReview = await runLogicReview('second_quality')
-      if (!logicReview.valid) throw new Error(`主模型重写后仍未通过逻辑审查：${logicReview.reason || '未知原因'}`)
+      logicReview = bubbles.length > 0 ? await runLogicReview('second_quality') : undefined
+      const secondTurnCheck = validatePrivateTurn(bubbles.length, turnRequirement)
+      const secondIssues = [
+        ...(logicReview && !logicReview.valid ? [`客观逻辑错误：${logicReview.reason}`] : []),
+        ...secondTurnCheck.issues,
+      ]
+      if (secondIssues.length > 0) {
+        qualityCheckDebug.detectedInvalid = true
+        qualityCheckDebug.reason = `重写后仍未通过硬性验收：${secondIssues.join('；')}`
+        console.warn(`[chat] 有限重写后保留可解析回复，状态变化仍由独立裁决器拒绝不可靠证据 对方=${displayName(contact)} 原因=${qualityCheckDebug.reason}`)
+      }
     }
-    knowledgeQueries = []
     if (imageRequestTask) {
       const parsedImage = bubbles.find((bubble): bubble is import('../types').AiBubbleImage => bubble.type === 'image')
       const imageReview = await reviewImageRequest({ task: imageRequestTask, latestUserText: _triggeringUserText, assistantText: rawText, parsedImage, contact, settings, signal: controller.signal, trace: { turnId: streamId, conversationId } })
@@ -580,14 +592,12 @@ async function runAiTurn(
         jsonRaw,
         finalRaw,
         bubbles,
-        knowledgeQueries,
         mood: turnMood,
         thought: turnThought,
         qualityCheck: qualityCheckDebug,
         injectedIntents,
         promptTrace: { sections: [{ label: '世界书', content: worldbookText }, { label: '结构化记忆', content: recentMemories }, { label: '特质规则', content: contact.customPersonalityTraits?.map((trait) => `${trait.name}: ${trait.meaning}`).join('\n') || contact.personalityTrait || '' }, { label: '关系与心情', content: relationshipText }, { label: '日程与当前情境', content: situationText }, { label: '主动话题', content: proactiveContext }].filter((section) => section.content), worldbookMatches: worldbookTrace.matches.map((match) => ({ id: match.entry.id, title: match.entry.title, score: match.score, chars: match.entry.content.length })), memorySummary: recentMemories, traitSummary: contact.customPersonalityTraits?.map((trait) => trait.name).join('、') || contact.personalityTrait, proactiveSource: proactiveContext || undefined },
       }),
-      knowledgeQueries,
       logicTrace: {
         worldVersion: logicBundle.worldVersion,
         locationTreeVersion: logicBundle.worldVersion,
@@ -596,7 +606,7 @@ async function runAiTurn(
         appointmentIds: logicBundle.subject.commitments.map((item) => item.id),
         memoryIds: logicBundle.memories.map((item) => item.id),
         perceivedEventIds: logicBundle.perceivedEvents.map((item) => item.eventId),
-        validation: qualityCheckDebug.detectedInvalid && !qualityCheckDebug.repaired ? 'rejected' : 'passed',
+        validation: qualityCheckDebug.detectedInvalid ? 'rejected' : 'passed',
         validationReason: qualityCheckDebug.reason,
       },
       createdAt: Date.now(),

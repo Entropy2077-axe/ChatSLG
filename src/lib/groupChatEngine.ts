@@ -33,6 +33,7 @@ import { reviewTurnLogic } from './turnLogicReviewer'
 import type { AppSettings, Contact, Group, GroupAiBubble, Message, Sticker } from '../types'
 import { messagesForAiTurn, recentConversationMessages } from './conversationStats'
 import { chatLivelinessRule } from './chatLiveliness'
+import { groupTurnRequirement, turnRepairInstruction, validateGroupTurn } from './turnRequirements'
 
 function globalGroupEnergy(settings: AppSettings): 'cold' | 'normal' | 'lively' {
   return settings.chatLiveliness === 'quiet' ? 'cold' : settings.chatLiveliness === 'lively' ? 'lively' : 'normal'
@@ -84,7 +85,6 @@ function parseGroupTurnDebugPayload(
   jsonRaw: string,
   finalRaw: string,
   bubbles: GroupAiBubble[],
-  knowledgeQueries: string[],
   turnSummary: string,
   groupVibe: string,
   storyOutline?: string,
@@ -106,7 +106,7 @@ function parseGroupTurnDebugPayload(
       }
     }
   }
-  return { mainPrompt, rawText, draftFeedback, jsonRaw, finalRaw, parsedBubbles: bubbles, knowledgeQueries, turnSummary, groupVibe, storyOutline, promptTrace: { sections: [{ label: '群聊主提示词', content: mainPrompt }] } }
+  return { mainPrompt, rawText, draftFeedback, jsonRaw, finalRaw, parsedBubbles: bubbles, turnSummary, groupVibe, storyOutline, promptTrace: { sections: [{ label: '群聊主提示词', content: mainPrompt }] } }
 }
 
 /** Admin-only safe stop for a group generation and its queued bubbles. */
@@ -393,6 +393,7 @@ async function runGroupAiTurn(
       engine.patch(conversationId, { aiTyping: false, typingLabel: undefined, error: '' })
       return
     }
+    const turnRequirement = groupTurnRequirement(settings.chatLiveliness, speakers.map((speaker) => speaker.id), Array.from(preferredSpeakerIds))
     console.log(`[group] 本轮发言人: ${speakers.map((s) => s.name).join('、')}`)
     const targetContext = targetedContextText(latestUserMessage, contactById, messageById, settings.userNickname)
     const recentEventsText = await recentSocialEventsText(members.map((m) => m.id), 4)
@@ -448,6 +449,11 @@ async function runGroupAiTurn(
       energyLevel: globalGroupEnergy(settings),
       scenePresenceText,
       replyCountRule: chatLivelinessRule(settings.chatLiveliness),
+      minimumDistinctSpeakers: turnRequirement.minimumDistinctSpeakers,
+      requiredSpeakerNames: turnRequirement.requiredSpeakerIds.flatMap((id) => {
+        const speaker = speakers.find((candidate) => candidate.id === id)
+        return speaker ? [displayName(speaker)] : []
+      }),
       currentTimeText: modelWorldTimeText(logicBundles[0].clock),
       worldDay: logicBundles[0].clock.day,
       worldSlot: logicBundles[0].clock.slot,
@@ -557,7 +563,7 @@ async function runGroupAiTurn(
       if (converted.bubbles.length > 0) parsedTurn = { ...converted, valid: true }
     }
     let finalRaw = jsonRaw
-    let { bubbles, knowledgeQueries, turnSummary, groupVibe } = parsedTurn
+    let { bubbles, turnSummary, groupVibe } = parsedTurn
     let assistantEvidenceIds: string[] = []
     const runLogicReview = async (stage: 'first_quality' | 'second_quality') => {
       assistantEvidenceIds = bubbles.map(() => uuid())
@@ -577,15 +583,20 @@ async function runGroupAiTurn(
     }
     let logicReview = bubbles.length > 0 ? await runLogicReview('first_quality') : undefined
     if (streamByConversation.get(conversationId) !== streamId) return
-    if (logicReview && !logicReview.valid) {
-      draftFeedback = logicReview.reason
-      console.warn(`[group] 逻辑审查要求主模型重写 群=${group.name} 原因=${draftFeedback}`)
+    const firstTurnCheck = validateGroupTurn(bubbles, speakers.map((speaker) => speaker.id), turnRequirement)
+    const firstIssues = [
+      ...(logicReview && !logicReview.valid ? [`客观逻辑错误：${logicReview.reason}`] : []),
+      ...firstTurnCheck.issues,
+    ]
+    if (firstIssues.length > 0) {
+      draftFeedback = firstIssues.join('；')
+      console.warn(`[group] 硬性验收要求主模型重写 群=${group.name} 原因=${draftFeedback}`)
       rawText = await chatCompletion({
         apiKey: settings.apiKey, baseUrl: settings.baseUrl, model: settings.model,
         messages: coalesceConsecutiveRoles([
           ...chatMessages,
           { role: 'assistant', content: rawText },
-          { role: 'user', content: `上一版群聊回复存在客观逻辑错误：${draftFeedback}\n请依据原始上下文重写完整群聊草稿。不要解释，不要输出JSON；每行仍严格使用 <人名>（想法）[心情]“消息内容”。` },
+          { role: 'user', content: `${turnRepairInstruction(firstIssues)}每行仍严格使用 <人名>（想法）[心情]“消息内容”。` },
         ]),
         signal: controller.signal, purpose: 'chat', thinking: 'disabled', temperature: 0.75, maxTokens: 1800,
         trace: { turnId: streamId, stage: 'second_chat', conversationId },
@@ -601,11 +612,15 @@ async function runGroupAiTurn(
         if (converted.bubbles.length > 0) parsedTurn = { ...converted, valid: true }
       }
       finalRaw = jsonRaw
-      ;({ bubbles, knowledgeQueries, turnSummary, groupVibe } = parsedTurn)
-      logicReview = await runLogicReview('second_quality')
-      if (!logicReview.valid) throw new Error(`主模型重写后仍未通过群聊逻辑审查：${logicReview.reason || '未知原因'}`)
+      ;({ bubbles, turnSummary, groupVibe } = parsedTurn)
+      logicReview = bubbles.length > 0 ? await runLogicReview('second_quality') : undefined
+      const secondTurnCheck = validateGroupTurn(bubbles, speakers.map((speaker) => speaker.id), turnRequirement)
+      const secondIssues = [
+        ...(logicReview && !logicReview.valid ? [`客观逻辑错误：${logicReview.reason}`] : []),
+        ...secondTurnCheck.issues,
+      ]
+      if (secondIssues.length > 0) throw new Error(`主模型重写后仍未通过群聊硬性验收：${secondIssues.join('；')}`)
     }
-    knowledgeQueries = []
     console.log(`[group] 收到回复(${finalRaw.length}字) 解析出${bubbles.length}条气泡 群=${group.name}`)
     if (bubbles.length === 0) {
       console.warn(`[group] 本轮没有人回复 群=${group.name} 原始内容: ${rawText.slice(0, 200)}`)
@@ -619,8 +634,7 @@ async function runGroupAiTurn(
       id: aiTurnId,
       conversationId,
       raw: finalRaw,
-      parsed: parseGroupTurnDebugPayload(systemPrompt, rawText, draftFeedback, jsonRaw, finalRaw, bubbles, knowledgeQueries, turnSummary, groupVibe, storyOutline),
-      knowledgeQueries,
+      parsed: parseGroupTurnDebugPayload(systemPrompt, rawText, draftFeedback, jsonRaw, finalRaw, bubbles, turnSummary, groupVibe, storyOutline),
       logicTrace: {
         worldVersion: logicBundles[0].worldVersion,
         locationTreeVersion: logicBundles[0].worldVersion,

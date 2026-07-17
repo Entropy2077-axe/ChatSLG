@@ -152,7 +152,6 @@ export function GroupInfoPage() {
           targetedContextText: '【预览】这里会放入用户本轮@、回复对象等定向上下文。',
           recentEventsText: '【预览】这里会放入最近朋友圈/群聊等社交事件。',
           worldviewText: isModuleEnabled('worldview') ? '【运行时按群聊内容检索世界书条目；此预览不固定命中结果】' : undefined,
-          knowledgeDigestText: undefined,
           selfIterationGlobalText: isModuleEnabled('selfIteration') ? settings.selfIterationGlobalPrompt : undefined,
           speakerMemoriesMap: new Map(),
         })
@@ -319,7 +318,7 @@ export function GroupInfoPage() {
 
         <section className="mt-3 bg-white px-4 py-4">
           <h3 className="mb-2 text-xs font-medium text-gray-400">回复条数由全局“聊天热闹程度”统一控制</h3>
-          <p className="text-xs text-gray-500">请在“设置”中选择冷清（1–2条）、一般（3–4条）或热闹（5–6条）。</p>
+          <p className="text-xs text-gray-500">请在“设置”中选择冷清（1–2条）、一般（3–4条）或热闹（固定7条）。</p>
           <div className="grid grid-cols-3 gap-2">
             {ENERGY_OPTIONS.map((option) => {
               const checked = (group.energyLevel ?? 'normal') === option.value

@@ -1,5 +1,5 @@
 import { db } from '../db/db'
-import { extractJsonObject, parseKnowledgeQueriesField, parseLocationChange, parseOutfitChange } from './aiProtocol'
+import { extractJsonObject, parseLocationChange, parseOutfitChange } from './aiProtocol'
 import { activeWorldPlansText } from './memory'
 import { customPersonalityTraitsLine, formatPersonaProfile, formatSpeechSamplesForScene, personalityTraitLine } from './prompt'
 import { isModuleEnabled } from '../features'
@@ -100,7 +100,6 @@ export function buildGroupSystemPrompt(opts: {
   targetedContextText?: string
   recentEventsText?: string
   worldviewText?: string
-  knowledgeDigestText?: string
   selfIterationGlobalText?: string
   /** contactId → formatted recent memories text (from contactMemories table) */
   speakerMemoriesMap?: Map<string, string>
@@ -137,9 +136,6 @@ ${samplesLine ? `【说话样例】\n${samplesLine}\n` : ''}
 
   const worldviewPrefix = opts.worldviewText ? `【世界设定】\n${opts.worldviewText}\n\n` : ''
   const selfIterationLine = opts.selfIterationGlobalText ? `\n【用户边界与偏好 - 全局】\n${opts.selfIterationGlobalText}` : ''
-  const knowledgeLine = opts.knowledgeDigestText
-    ? `\n热梗资讯: ${opts.knowledgeDigestText}`
-    : ''
   const targetedContextLine = opts.targetedContextText
     ? `\nTargeted group-chat context:\n${opts.targetedContextText}\nIf the user @mentions someone, that person should answer first. If the user replies to a message, answer that referenced message directly before changing topic. Keep it natural and short.`
     : ''
@@ -166,7 +162,7 @@ ${speakerBlocks}
 
 【当前】
 时间: ${opts.currentTimeText}
-用户（群成员之一）: ${opts.userProfileText}${knowledgeLine}${targetedContextLine}${recentEventsLine}${selfIterationLine}
+用户（群成员之一）: ${opts.userProfileText}${targetedContextLine}${recentEventsLine}${selfIterationLine}
 
 【输出格式】
 整个输出必须是JSON:
@@ -194,6 +190,8 @@ export function buildGroupRawChatPrompt(opts: {
   /** Scene-only physical/audibility facts. Every speaker must retain this location. */
   scenePresenceText?: string
   replyCountRule?: string
+  minimumDistinctSpeakers?: number
+  requiredSpeakerNames?: string[]
   currentTimeText: string
   worldDay: number
   worldSlot: import('../types').TimeSlot
@@ -201,7 +199,6 @@ export function buildGroupRawChatPrompt(opts: {
   targetedContextText?: string
   recentEventsText?: string
   worldviewText?: string
-  knowledgeDigestText?: string
   selfIterationGlobalText?: string
   speakerMemoriesMap?: Map<string, string>
   aiRelationshipText?: string
@@ -237,12 +234,14 @@ ${samplesText ? `- 说话样例:\n${samplesText}` : ''}`
   const recentEvents = opts.recentEventsText ? `\n【最近发生的事】\n${opts.recentEventsText}` : ''
   const aiRelationships = opts.aiRelationshipText ? `\n${opts.aiRelationshipText}` : ''
   const worldview = opts.worldviewText ? `\n【世界设定】\n${opts.worldviewText}` : ''
-  const knowledge = opts.knowledgeDigestText ? `\n【可参考资讯】\n${opts.knowledgeDigestText}` : ''
   const selfIteration = opts.selfIterationGlobalText ? `\n【用户边界与偏好 - 全局】\n${opts.selfIterationGlobalText}` : ''
   const groupMemory = opts.groupMemoryText?.trim() ? `\n【群聊记忆】\n${opts.groupMemoryText.trim()}` : ''
   const groupVibe = opts.groupVibeText?.trim() ? `\n【群聊氛围】\n${opts.groupVibeText.trim()}` : ''
   const scenePresence = opts.scenePresenceText ? `\n【现场位置（硬事实）】\n${opts.scenePresenceText}\n能听到现场的人可以回答，但绝不可以假装就在现场；回复时要符合其真实所在地点与可听见程度。` : ''
   const replyCountRule = opts.replyCountRule ? `\n【本轮消息数】\n${opts.replyCountRule}` : ''
+  const participationRule = `本轮至少要有 ${opts.minimumDistinctSpeakers ?? 1} 名不同发言人实际发言。${
+    opts.requiredSpeakerNames?.length ? `其中 ${opts.requiredSpeakerNames.join('、')} 必须实际发言。` : ''
+  }`
   const chatterRule = opts.allowAiChatter === false
     ? '- 本群设置为“围绕用户”：AI只能回应用户本轮消息、用户@/回复对象或用户相关话题，不要发展AI之间的旁支闲聊。\n'
     : opts.speakers.length >= 2
@@ -252,7 +251,7 @@ ${samplesText ? `- 说话样例:\n${samplesText}` : ''}`
     opts.energyLevel === 'cold'
       ? '- 群聊热闹程度=冷清：整轮总共1到2条消息。\n'
       : opts.energyLevel === 'lively'
-        ? '- 群聊热闹程度=热闹：整轮总共5到6条消息，允许同一人多次插入；不要为了凑条数灌水。\n'
+        ? '- 群聊热闹程度=热闹：整轮必须恰好7条消息，允许同一人多次插入；不要用重复内容灌水。\n'
         : '- 群聊热闹程度=一般：整轮总共3到4条消息，节奏自然。\n'
   const formatContract = `硬格式契约:
 - 最终只输出群聊草稿行，不输出分析、计划、标题、编号、JSON、Markdown。
@@ -265,13 +264,14 @@ ${samplesText ? `- 说话样例:\n${samplesText}` : ''}`
   const interactionContract = `发言编排契约:
 - 先在心里决定“谁说几句、谁接谁的话”，但不要把计划输出。
 - 本轮发言人只能来自: ${speakerNames}。
-  - 被@或被回复的人先处理；其他人不要机械排队答题，也不必每个被选中的人都说话。
+  - 被@或被回复的人先处理并且必须实际发言；其他人不要机械排队答题。
+- ${participationRule}
 - ${opts.allowAiChatter === false ? 'AI互聊关闭：所有发言都围绕用户、用户@/回复对象或用户相关话题。' : opts.speakers.length >= 2 ? 'AI互聊开启：只有出现自然接点时才让成员互相接话；不要为了证明是群聊而硬凑互动。' : '本轮只有一位AI发言人：不要求AI之间互动。'}
 - ${
     opts.energyLevel === 'cold'
       ? '冷清：整轮总共1到2句。'
       : opts.energyLevel === 'lively'
-        ? '热闹：整轮总共5到6句，可穿插多次。'
+        ? '热闹：整轮必须恰好7句，可穿插多次。'
         : '一般：整轮总共3到4句。'
   }
 - 可以同一人多次插入，不需要按发言人顺序轮流。`
@@ -310,7 +310,7 @@ ${opts.stylePrompt}
 ${worldview}${scenePresence}${replyCountRule}
 【当前上下文】
 时间: ${opts.currentTimeText}
-用户资料: ${opts.userProfileText}${groupMemory}${groupVibe}${knowledge}${targetedContext}${recentEvents}${aiRelationships}${selfIteration}
+用户资料: ${opts.userProfileText}${groupMemory}${groupVibe}${targetedContext}${recentEvents}${aiRelationships}${selfIteration}
 
 ${speakerBlocks}
 
@@ -320,7 +320,7 @@ ${speakerBlocks}
 - 每个角色只能说自己知道或自己能感受到的事，不能替别人提私人记忆/约定。
 - 被@的人必须优先回应；被回复的人或被回复消息的说话者必须优先处理。
 ${chatterRule}
-  - 每个发言人可以随时插入多次发言，也可以本轮沉默，不需要按发言人顺序轮流说。允许“1说一句、2插一句、1再接、3再说”。
+  - 发言人可以随时插入多次，不需要按顺序轮流；但必须满足上面的最低不同发言人数和指定角色参与规则。
 ${energyRule}
 - 不要把私聊口吻带进群聊，不要称用户为"对方"。
 - 不要编造课堂、线下见面、过去承诺等没有依据的具体事实。
@@ -440,7 +440,6 @@ function parseSpeakerIndex(v: unknown): number | null {
  */
 export interface ParsedGroupTurn {
   bubbles: GroupAiBubble[]
-  knowledgeQueries: string[]
   turnSummary: string
   groupVibe: string
   planCandidates: Array<{ title: string; summary: string; participantIndexes: number[]; location?: string }>
@@ -462,7 +461,6 @@ export function parseGroupRawDraft(raw: string, speakers: Contact[]): ParsedGrou
     valid: false,
     reason: '草稿为空',
     bubbles: [],
-    knowledgeQueries: [],
     turnSummary: '',
     groupVibe: '',
     planCandidates: [],
@@ -493,7 +491,6 @@ export function parseGroupRawDraft(raw: string, speakers: Contact[]): ParsedGrou
   return {
     valid: bubbles.length > 0,
     bubbles,
-    knowledgeQueries: [],
     turnSummary: bubbles.map((bubble) => `${bubble.speakerName}：${bubble.content}`).join('；').slice(0, 180),
     groupVibe: '',
     planCandidates: [],
@@ -515,7 +512,7 @@ export function serializeGroupTurn(parsed: ParsedGroupTurn): string {
 
 export function parseGroupAiResponse(raw: string, speakerCount: number): ParsedGroupTurn {
   const trimmed = raw.trim()
-  if (!trimmed) return { bubbles: [], knowledgeQueries: [], turnSummary: '', groupVibe: '', planCandidates: [], outfitChanges: [], scheduleChanges: [], locationChanges: [] }
+  if (!trimmed) return { bubbles: [], turnSummary: '', groupVibe: '', planCandidates: [], outfitChanges: [], scheduleChanges: [], locationChanges: [] }
 
   const jsonResult = tryParseGroupJson(trimmed, speakerCount)
   if (jsonResult && jsonResult.bubbles.length > 0) return jsonResult
@@ -525,7 +522,7 @@ export function parseGroupAiResponse(raw: string, speakerCount: number): ParsedG
     .map((line) => line.trim())
     .filter(Boolean)
     .map((content, i) => ({ speakerIndex: (i % speakerCount) + 1, type: 'text' as const, content }))
-  return { bubbles: fallbackBubbles, knowledgeQueries: [], turnSummary: fallbackBubbles.map((b) => b.content).join(' ').slice(0, 160), groupVibe: '群聊氛围暂未更新。', planCandidates: [], outfitChanges: [], scheduleChanges: [], locationChanges: [] }
+  return { bubbles: fallbackBubbles, turnSummary: fallbackBubbles.map((b) => b.content).join(' ').slice(0, 160), groupVibe: '群聊氛围暂未更新。', planCandidates: [], outfitChanges: [], scheduleChanges: [], locationChanges: [] }
 }
 
 function tryParseGroupJson(trimmedRaw: string, speakerCount: number): ParsedGroupTurn | null {
@@ -562,7 +559,6 @@ function tryParseGroupJson(trimmedRaw: string, speakerCount: number): ParsedGrou
   }
   return {
     bubbles,
-    knowledgeQueries: parseKnowledgeQueriesField(parsed.knowledgeQueries),
     turnSummary: typeof parsed.turnSummary === 'string' ? parsed.turnSummary.trim() : '',
     groupVibe: typeof parsed.groupVibe === 'string' ? parsed.groupVibe.trim() : '',
     outfitChanges: Array.isArray(parsed.outfitChanges) ? parsed.outfitChanges.map(parseOutfitChange).filter((item): item is OutfitChangeProposal => !!item).slice(0, speakerCount) : [],
