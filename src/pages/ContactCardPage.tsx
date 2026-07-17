@@ -202,19 +202,21 @@ export function ContactCardPage() {
     }
     await cascadeDeleteContactSocialData(contactId!)
     await removeContactFromAllGroups(contactId!)
-    const [appointments, perceptions, diaries, pending, schedules] = await Promise.all([
+    const [appointments, perceptions, diaries, pending, schedules, archives] = await Promise.all([
       db.appointments.filter((item) => item.participantIds.includes(contactId!)).toArray(),
       db.perceivedEvents.where('characterId').equals(contactId!).toArray(),
       db.characterDiaries.where('characterId').equals(contactId!).toArray(),
       db.pendingPhoneMessages.filter((item) => item.recipientIds.includes(contactId!)).toArray(),
       db.characterSchedules.where('characterId').equals(contactId!).toArray(),
+      db.contactArchives.where('contactId').equals(contactId!).toArray(),
     ])
-    await db.transaction('rw', db.appointments, db.perceivedEvents, db.characterDiaries, db.pendingPhoneMessages, db.characterSchedules, async () => {
+    await db.transaction('rw', [db.appointments, db.perceivedEvents, db.characterDiaries, db.pendingPhoneMessages, db.characterSchedules, db.contactArchives], async () => {
       await db.appointments.bulkDelete(appointments.map((item) => item.id))
       await db.perceivedEvents.bulkDelete(perceptions.map((item) => item.id))
       await db.characterDiaries.bulkDelete(diaries.map((item) => item.id))
       await db.pendingPhoneMessages.bulkDelete(pending.map((item) => item.id))
       await db.characterSchedules.bulkDelete(schedules.map((item) => item.id))
+      await db.contactArchives.bulkDelete(archives.map((item) => item.id))
     })
     await db.contacts.delete(contactId!)
     navigate('/contacts', { replace: true })
@@ -328,6 +330,13 @@ export function ContactCardPage() {
         >
           <span className="text-[15px] text-gray-900">关系定位</span>
           <span className="text-sm text-gray-400">{contact.relationshipBase || '未设置'}</span>
+        </button>
+        <button
+          onClick={() => navigate(`/contact/${contact.id}/archives`)}
+          className="flex w-full items-center justify-between border-b border-gray-100 px-4 py-3.5 text-left active:bg-gray-50"
+        >
+          <span className="text-[15px] text-gray-900">联系人自动存档</span>
+          <span className="text-sm text-gray-400">按世界时段查看 ›</span>
         </button>
         {personalityEnabled && (
           <button

@@ -15,6 +15,7 @@ import { isModuleEnabled } from '../features'
 import { formatWeatherForModel, weatherForWorld } from './worldWeather'
 import { directedEventPrompt, prepareDirectedEvent, type PreparedDirectedEvent } from './eventDirector'
 import { adjudicateScheduleDeviations, type ScheduleDeviationCandidate, type ScheduleDeviationEvidence, type ScheduleDeviationProposal, type ScheduleDeviationVerdict } from './scheduleDeviation'
+import { archiveContactsForTimeSlice } from './contactArchives'
 
 interface TurnCharacter {
   characterId: string
@@ -279,6 +280,7 @@ export async function advanceWorldTurn(settings: AppSettings): Promise<void> {
       await refreshConstraintsForWorld(next.day, next.slot)
       await settleSalaries(next.day).catch((error) => console.error('[world-turn] 世界日工资结算失败，将在下一时段重试', error))
       if (isModuleEnabled('lifeSimulation')) await settleLifeSimulationForWorldTurn(next).catch((error) => console.error('[world-turn] 世界生活状态结算失败，将在下一时段补算', error))
+      await archiveContactsForTimeSlice({ ...next, worldVersion: world.worldVersion }).catch((error) => console.error('[world-turn] 联系人自动存档失败', error))
       return
     }
     if (!settings.apiKey) throw new Error('请先在设置中配置 API Key')
@@ -598,6 +600,7 @@ ${evidenceText}
     await settleSalaries(next.day).catch((error) => console.error('[world-turn] 世界日工资结算失败，将在下一时段重试', error))
     if (isModuleEnabled('lifeSimulation')) await settleLifeSimulationForWorldTurn(next).catch((error) => console.error('[world-turn] 世界生活状态结算失败，将在下一时段补算', error))
     await maybeArchiveMemories(next.step)
+    await archiveContactsForTimeSlice({ ...next, worldVersion: world.worldVersion }).catch((error) => console.error('[world-turn] 联系人自动存档失败', error))
   })().finally(() => { running = null })
   return running
 }

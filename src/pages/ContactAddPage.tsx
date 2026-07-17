@@ -21,7 +21,9 @@ import { ensureWorldInitialized } from '../lib/world'
 import { OUTFIT_FIELDS } from '../lib/outfit'
 import { enqueueContactCreation } from '../lib/contactCreationQueue'
 import { stableVisualSeed } from '../lib/contactVisual'
+import { archiveContactSnapshot } from '../lib/contactArchives'
 import { CONTACT_RELATION_LABELS, HOBBY_TAG_OPTIONS, PERSONALITY_TRAIT_OPTIONS, type ContactRelationLabel, type CustomPersonalityTrait } from '../types'
+import type { ContactCreatorCustomOptions } from '../types'
 import {
   AGE_RANGE_OPTIONS,
   GENDER_OPTIONS,
@@ -52,6 +54,10 @@ export function ContactAddPage() {
 
   const [tags, setTags] = useState<string[]>([])
   const [customTag, setCustomTag] = useState('')
+  const [customAgeInput, setCustomAgeInput] = useState('')
+  const [customGenderInput, setCustomGenderInput] = useState('')
+  const [customRelationshipInput, setCustomRelationshipInput] = useState('')
+  const [customHobbyInput, setCustomHobbyInput] = useState('')
   const [ageRange, setAgeRange] = useState('')
   const [gender, setGender] = useState('')
   const personalityEnabled = useModuleEnabled('personalityTraits')
@@ -94,6 +100,9 @@ export function ContactAddPage() {
   const [customBirthday, setCustomBirthday] = useState('')
   const [personaPickerOpen, setPersonaPickerOpen] = useState(false)
   const [personaPage, setPersonaPage] = useState(0)
+  const customOptions: ContactCreatorCustomOptions = settings.contactCreatorCustomOptions ?? {
+    personality: [], ages: [], genders: [], relationships: [], hobbies: [],
+  }
 
   function returnToContacts() {
     if ((location.state as { returnToContacts?: boolean } | null)?.returnToContacts) navigate(-1)
@@ -155,9 +164,56 @@ export function ContactAddPage() {
 
   function addCustomTag() {
     const trimmed = customTag.trim()
-    if (!trimmed || tags.includes(trimmed)) return
-    setTags((prev) => [...prev, trimmed])
+    if (!trimmed) return
+    saveCustomOption('personality', trimmed)
+    setTags((prev) => prev.includes(trimmed) ? prev : [...prev, trimmed])
     setCustomTag('')
+  }
+
+  function saveCustomOption(category: keyof ContactCreatorCustomOptions, raw: string) {
+    const value = raw.trim()
+    if (!value || customOptions[category].includes(value)) return
+    settings.setSettings({
+      contactCreatorCustomOptions: {
+        ...customOptions,
+        [category]: [...customOptions[category], value],
+      },
+    })
+  }
+
+  function removeCustomOption(category: keyof ContactCreatorCustomOptions, value: string) {
+    settings.setSettings({
+      contactCreatorCustomOptions: {
+        ...customOptions,
+        [category]: customOptions[category].filter((item) => item !== value),
+      },
+    })
+    if (category === 'personality') setTags((prev) => prev.filter((item) => item !== value))
+    if (category === 'ages' && ageRange === value) setAgeRange('')
+    if (category === 'genders' && gender === value) setGender('')
+    if (category === 'relationships' && relationship === value) setRelationship('')
+    if (category === 'hobbies') setHobbies((prev) => prev.filter((item) => item !== value))
+  }
+
+  function addSingleCustomOption(
+    category: 'ages' | 'genders' | 'relationships',
+    raw: string,
+    select: (value: string) => void,
+    clear: () => void,
+  ) {
+    const value = raw.trim()
+    if (!value) return
+    saveCustomOption(category, value)
+    select(value)
+    clear()
+  }
+
+  function addCustomHobby() {
+    const value = customHobbyInput.trim()
+    if (!value) return
+    saveCustomOption('hobbies', value)
+    setHobbies((prev) => prev.includes(value) ? prev : [...prev, value])
+    setCustomHobbyInput('')
   }
 
   function addRandomTrait() {
@@ -256,6 +312,7 @@ export function ContactAddPage() {
           now,
         })
       }
+      await archiveContactSnapshot(id, currentWorld, 'created')
       updateJob(selectedJob.id, { status: 'completed' })
       removeJob(selectedJob.id)
       returnToContacts()
@@ -319,17 +376,15 @@ export function ContactAddPage() {
               {tag}
             </button>
           ))}
-          {tags
-            .filter((t) => !PERSONALITY_TAG_OPTIONS.includes(t))
-            .map((tag) => (
-              <button
-                key={tag}
-                onClick={() => toggleTag(tag)}
-                className="rounded-full bg-gray-900 px-3 py-1.5 text-xs text-white"
-              >
-                {tag} ×
-              </button>
-            ))}
+          {customOptions.personality.filter((tag) => !PERSONALITY_TAG_OPTIONS.includes(tag)).map((tag) => (
+            <span key={tag} className={`inline-flex overflow-hidden rounded-full text-xs ${tags.includes(tag) ? 'bg-gray-900 text-white' : 'bg-gray-100 text-gray-600'}`}>
+              <button type="button" onClick={() => toggleTag(tag)} className="px-3 py-1.5">{tag}</button>
+              <button type="button" aria-label={`删除性格标签${tag}`} onClick={() => removeCustomOption('personality', tag)} className="border-l border-current/20 px-2">×</button>
+            </span>
+          ))}
+          {tags.filter((tag) => !PERSONALITY_TAG_OPTIONS.includes(tag) && !customOptions.personality.includes(tag)).map((tag) => (
+            <button key={tag} type="button" onClick={() => toggleTag(tag)} className="rounded-full bg-gray-900 px-3 py-1.5 text-xs text-white">{tag}</button>
+          ))}
         </div>
         <div className="mb-4 flex gap-2">
           <input
@@ -365,10 +420,20 @@ export function ContactAddPage() {
               {v}
             </button>
           ))}
+          {customOptions.ages.filter((value) => !AGE_RANGE_OPTIONS.includes(value)).map((value) => (
+            <span key={value} className={`inline-flex overflow-hidden rounded-full text-xs ${ageRange === value ? 'bg-gray-900 text-white' : 'bg-gray-100 text-gray-600'}`}>
+              <button type="button" onClick={() => setAgeRange(ageRange === value ? '' : value)} className="px-3 py-1.5">{value}</button>
+              <button type="button" aria-label={`删除年龄段${value}`} onClick={() => removeCustomOption('ages', value)} className="border-l border-current/20 px-2">×</button>
+            </span>
+          ))}
+        </div>
+        <div className="mb-4 flex gap-2">
+          <input value={customAgeInput} onChange={(e) => setCustomAgeInput(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); addSingleCustomOption('ages', customAgeInput, setAgeRange, () => setCustomAgeInput('')) } }} placeholder="自定义年龄或年龄段" className="flex-1 rounded-lg border border-gray-200 px-3 py-1.5 text-xs"/>
+          <button type="button" onClick={() => addSingleCustomOption('ages', customAgeInput, setAgeRange, () => setCustomAgeInput(''))} className="rounded-lg bg-gray-100 px-3 text-xs text-gray-600">添加</button>
         </div>
 
         <label className="mb-2 block text-xs font-medium text-gray-400">性别</label>
-        <div className="mb-4 flex flex-wrap gap-2">
+        <div className="mb-2 flex flex-wrap gap-2">
           {GENDER_OPTIONS.map((v, index) => (
             <button
               key={`gender-${v}-${index}`}
@@ -380,10 +445,20 @@ export function ContactAddPage() {
               {v}
             </button>
           ))}
+          {customOptions.genders.filter((value) => !GENDER_OPTIONS.includes(value)).map((value) => (
+            <span key={value} className={`inline-flex overflow-hidden rounded-full text-xs ${gender === value ? 'bg-gray-900 text-white' : 'bg-gray-100 text-gray-600'}`}>
+              <button type="button" onClick={() => setGender(gender === value ? '' : value)} className="px-3 py-1.5">{value}</button>
+              <button type="button" aria-label={`删除性别${value}`} onClick={() => removeCustomOption('genders', value)} className="border-l border-current/20 px-2">×</button>
+            </span>
+          ))}
+        </div>
+        <div className="mb-4 flex gap-2">
+          <input value={customGenderInput} onChange={(e) => setCustomGenderInput(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); addSingleCustomOption('genders', customGenderInput, setGender, () => setCustomGenderInput('')) } }} placeholder="自定义性别" className="flex-1 rounded-lg border border-gray-200 px-3 py-1.5 text-xs"/>
+          <button type="button" onClick={() => addSingleCustomOption('genders', customGenderInput, setGender, () => setCustomGenderInput(''))} className="rounded-lg bg-gray-100 px-3 text-xs text-gray-600">添加</button>
         </div>
 
         <label className="mb-2 block text-xs font-medium text-gray-400">关系定位</label>
-        <div className="mb-4 flex flex-wrap gap-2">
+        <div className="mb-2 flex flex-wrap gap-2">
           {RELATIONSHIP_OPTIONS.map((v, index) => (
             <button
               key={`relationship-${v}-${index}`}
@@ -395,6 +470,16 @@ export function ContactAddPage() {
               {v}
             </button>
           ))}
+          {customOptions.relationships.filter((value) => !RELATIONSHIP_OPTIONS.includes(value)).map((value) => (
+            <span key={value} className={`inline-flex overflow-hidden rounded-full text-xs ${relationship === value ? 'bg-gray-900 text-white' : 'bg-gray-100 text-gray-600'}`}>
+              <button type="button" onClick={() => setRelationship(relationship === value ? '' : value)} className="px-3 py-1.5">{value}</button>
+              <button type="button" aria-label={`删除关系定位${value}`} onClick={() => removeCustomOption('relationships', value)} className="border-l border-current/20 px-2">×</button>
+            </span>
+          ))}
+        </div>
+        <div className="mb-4 flex gap-2">
+          <input value={customRelationshipInput} onChange={(e) => setCustomRelationshipInput(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); addSingleCustomOption('relationships', customRelationshipInput, setRelationship, () => setCustomRelationshipInput('')) } }} placeholder="自定义关系定位" className="flex-1 rounded-lg border border-gray-200 px-3 py-1.5 text-xs"/>
+          <button type="button" onClick={() => addSingleCustomOption('relationships', customRelationshipInput, setRelationship, () => setCustomRelationshipInput(''))} className="rounded-lg bg-gray-100 px-3 text-xs text-gray-600">添加</button>
         </div>
 
         {personalityEnabled && (
@@ -453,6 +538,16 @@ export function ContactAddPage() {
                 {hobby}
               </button>
             ))}
+            {customOptions.hobbies.filter((value) => !(HOBBY_TAG_OPTIONS as readonly string[]).includes(value)).map((value) => (
+              <span key={value} className={`inline-flex overflow-hidden rounded-full text-xs ${hobbies.includes(value) ? 'bg-gray-900 text-white' : 'bg-gray-100 text-gray-600'}`}>
+                <button type="button" onClick={() => setHobbies((prev) => prev.includes(value) ? prev.filter((item) => item !== value) : [...prev, value])} className="px-3 py-1.5">{value}</button>
+                <button type="button" aria-label={`删除兴趣爱好${value}`} onClick={() => removeCustomOption('hobbies', value)} className="border-l border-current/20 px-2">×</button>
+              </span>
+            ))}
+          </div>
+          <div className="mt-2 flex gap-2">
+            <input value={customHobbyInput} onChange={(e) => setCustomHobbyInput(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); addCustomHobby() } }} placeholder="自定义兴趣爱好" className="flex-1 rounded-lg border border-gray-200 px-3 py-1.5 text-xs"/>
+            <button type="button" onClick={addCustomHobby} className="rounded-lg bg-gray-100 px-3 text-xs text-gray-600">添加</button>
           </div>
         </div></>}
 

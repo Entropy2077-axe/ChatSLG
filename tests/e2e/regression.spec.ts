@@ -152,7 +152,7 @@ test('settings page exports a complete ChatSLG backup json', async ({ page }) =>
 
   const backup = JSON.parse(await import('node:fs/promises').then((fs) => fs.readFile(path!, 'utf8')))
   expect(backup.format).toBe('chatslg-backup')
-  expect(backup.schemaVersion).toBe(7)
+  expect(backup.schemaVersion).toBe(8)
   expect(backup.settings.userNickname).toBe('Backup User')
   expect(JSON.stringify(backup.settings)).not.toContain('sk-regression-secret')
   expect(JSON.stringify(backup.settings)).not.toContain('pexels-regression-secret')
@@ -161,7 +161,7 @@ test('settings page exports a complete ChatSLG backup json', async ({ page }) =>
   expect(backup.tables.conversations).toHaveLength(1)
   expect(backup.tables.messages).toHaveLength(1)
   expect(Object.keys(backup.tables)).toEqual(
-    expect.arrayContaining(['moments', 'savedWorldviews', 'worldbookEntries', 'worldMaps', 'mediaAssets', 'imageRequests']),
+    expect.arrayContaining(['moments', 'savedWorldviews', 'worldbookEntries', 'worldMaps', 'mediaAssets', 'imageRequests', 'contactArchives']),
   )
 })
 
@@ -534,6 +534,45 @@ test('nuwa mode replaces preset creator fields with free-form fields', async ({ 
   await expect(page.getByText('上升倍率')).toHaveCount(0)
 })
 
+test('standard creator keeps reusable custom choices until the user deletes them', async ({ page }) => {
+  await page.goto('/#/contact/new')
+  await page.getByRole('button', { name: '标准模式' }).click()
+  const add = async (placeholder: string, value: string) => {
+    const input = page.getByPlaceholder(placeholder)
+    await input.fill(value)
+    await input.locator('..').getByRole('button', { name: '添加' }).click()
+  }
+  await add('自定义一个性格标签', '外冷内热')
+  await add('自定义年龄或年龄段', '千岁以上')
+  await add('自定义性别', '无性别')
+  await add('自定义关系定位', '宿命搭档')
+  await add('自定义兴趣爱好', '收集旧唱片')
+  await page.reload()
+  await expect(page.getByRole('button', { name: '外冷内热', exact: true })).toBeVisible()
+  await expect(page.getByRole('button', { name: '千岁以上', exact: true })).toBeVisible()
+  await expect(page.getByRole('button', { name: '无性别', exact: true })).toBeVisible()
+  await expect(page.getByRole('button', { name: '宿命搭档', exact: true })).toBeVisible()
+  await expect(page.getByRole('button', { name: '收集旧唱片', exact: true })).toBeVisible()
+  await page.getByRole('button', { name: '删除性格标签外冷内热' }).click()
+  await page.reload()
+  await expect(page.getByRole('button', { name: '外冷内热', exact: true })).toHaveCount(0)
+})
+
+test('contact archives are saved and viewable by world time slice', async ({ page }) => {
+  await page.goto('/#/phone')
+  await seedBackupFixture(page)
+  await page.evaluate(async () => {
+    const { archiveContactSnapshot } = await import('/src/lib/contactArchives.ts')
+    await archiveContactSnapshot('contact-backup', { worldVersion: 1, step: 4, day: 2, slot: 'morning' }, 'time_slice')
+  })
+  await page.goto('/#/contact/contact-backup/archives')
+  await expect(page.getByText('联系人自动存档')).toBeVisible()
+  await expect(page.getByText('架空历第1年 · 春季第2日 · 早晨')).toBeVisible()
+  await expect(page.getByText('自动时间切片')).toBeVisible()
+  await page.getByText('架空历第1年 · 春季第2日 · 早晨').click()
+  await expect(page.getByText('当时的人设')).toBeVisible()
+})
+
 test('mind-reading settings expose a gated style submenu with four previews', async ({ page }) => {
   await page.goto('/#/settings')
   const toggle = page.getByLabel('切换读心模式')
@@ -667,7 +706,7 @@ test('queued contact creation replaces the creator history entry', async ({ page
   await expect(page.getByRole('heading', { name: '添加联系人' })).toHaveCount(0)
 })
 
-test('contact creation queue keeps running off-page and automatically saves the next valid contact', async ({ page }) => {
+test('contact creation queue retries malformed persona JSON and keeps running off-page', async ({ page }) => {
   let requestCount = 0
   let activeRequests = 0
   let maxActiveRequests = 0
@@ -702,10 +741,10 @@ test('contact creation queue keeps running off-page and automatically saves the 
     const { useContactCreationStore } = await import('/src/store/useContactCreationStore')
     const { db } = await import('/src/db/db.ts')
     return { statuses: useContactCreationStore.getState().jobs.map((job) => job.status), contacts: await db.contacts.count() }
-  })).toEqual({ statuses: ['failed'], contacts: 1 })
-  expect(requestCount).toBe(2)
+  })).toEqual({ statuses: [], contacts: 2 })
+  expect(requestCount).toBe(3)
   expect(maxActiveRequests).toBe(1)
   await expect(page).toHaveURL(/#\/phone$/)
   await page.getByText('联系人', { exact: true }).click()
-  await expect(page.getByText('队列角色', { exact: true })).toBeVisible()
+  await expect(page.getByText('队列角色', { exact: true }).first()).toBeVisible()
 })

@@ -17,6 +17,7 @@ const ContactsPage = page(() => import('./pages/ContactsPage'), 'ContactsPage')
 const WorldPage = page(() => import('./pages/WorldPage'), 'WorldPage')
 const ChatPage = page(() => import('./pages/ChatPage'), 'ChatPage')
 const ContactCardPage = page(() => import('./pages/ContactCardPage'), 'ContactCardPage')
+const ContactArchivePage = page(() => import('./pages/ContactArchivePage'), 'ContactArchivePage')
 const ContactAddPage = page(() => import('./pages/ContactAddPage'), 'ContactAddPage')
 const GroupAddPage = page(() => import('./pages/GroupAddPage'), 'GroupAddPage')
 const GroupInfoPage = page(() => import('./pages/GroupInfoPage'), 'GroupInfoPage')
@@ -116,6 +117,7 @@ function App() {
         <Route path="/chat/:conversationId" element={<ChatPage />} />
         <Route path="/contact/new" element={<ContactAddPage />} />
         <Route path="/contact/:contactId" element={<ContactCardPage />} />
+        <Route path="/contact/:contactId/archives" element={<ContactArchivePage />} />
         <Route path="/group/new" element={<GroupAddPage />} />
         <Route path="/group/:groupId" element={<GroupInfoPage />} />
         <Route path="/social-inbox" element={<SocialInboxPage />} />

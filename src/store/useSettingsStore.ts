@@ -63,11 +63,18 @@ function createSettingsStore() {
       selfIterationGlobalPrompt: '',
       adminModeEnabled: false,
       contactCreatorMode: 'standard',
+      contactCreatorCustomOptions: {
+        personality: [],
+        ages: [],
+        genders: [],
+        relationships: [],
+        hobbies: [],
+      },
       setSettings: (patch) => set(patch),
     }),
     {
       name: 'chatslg-settings',
-      version: 11,
+      version: 12,
       migrate: (persisted, version) => {
         const next = persisted as Partial<SettingsState>
         if (typeof next.userOccupation !== 'string') next.userOccupation = ''
@@ -95,6 +102,14 @@ function createSettingsStore() {
           delete (next as Record<string, unknown>).enabledModules
         }
         if (!['quiet', 'normal', 'lively'].includes(String(next.chatLiveliness))) next.chatLiveliness = 'normal'
+        const customOptions = next.contactCreatorCustomOptions
+        next.contactCreatorCustomOptions = {
+          personality: Array.isArray(customOptions?.personality) ? customOptions.personality.filter((item): item is string => typeof item === 'string') : [],
+          ages: Array.isArray(customOptions?.ages) ? customOptions.ages.filter((item): item is string => typeof item === 'string') : [],
+          genders: Array.isArray(customOptions?.genders) ? customOptions.genders.filter((item): item is string => typeof item === 'string') : [],
+          relationships: Array.isArray(customOptions?.relationships) ? customOptions.relationships.filter((item): item is string => typeof item === 'string') : [],
+          hobbies: Array.isArray(customOptions?.hobbies) ? customOptions.hobbies.filter((item): item is string => typeof item === 'string') : [],
+        }
         return next
       },
     },

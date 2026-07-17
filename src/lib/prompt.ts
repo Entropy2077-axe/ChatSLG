@@ -399,7 +399,7 @@ ${locationTreeText || '当前没有可用地点，日程数组必须为空'}
   "realName": "真实姓名",
   "nickname": "网名/昵称",
   "birthday": "YYYY-MM-DD",
-  "persona": "第三人称描述这个人的性格、说话习惯、大概的背景和生活状态、和用户的关系细节 写成一段自然语言 200到400字之间 要具体真实 不要写成产品说明书",
+  "persona": "第三人称描述这个人的性格、说话习惯、背景生活和关系细节 写成一段自然语言 160到260字 要具体真实",
   "mbti": "这个人的MBTI类型 根据你设计的人设推断最符合的四字母 比如INFP/ESTJ/INTJ等 必须是一个有效的MBTI类型",
   "speechSamples": ["[日常] 一句符合这个人说话方式的短消息", "[被关心] 一句短消息", "[情绪触发] 一句短消息", "[亲近互动] 一句短消息"],
   "personaProfile": {"facts":["不可改变的身份/背景事实"],"boundaries":["关系边界或禁忌"],"habits":["稳定习惯/口癖"],"behaviorAnchors":["遇到某类情境会如何自然反应"]},
@@ -418,11 +418,12 @@ ${locationTreeText || '当前没有可用地点，日程数组必须为空'}
 - persona里要体现性格倾向和关系定位 但要写得像在描述一个真实存在的普通人 而不是罗列标签
 - persona和worldSchedule必须明确符合所选职业 monthlySalary按当前游戏货币尺度生成1000到200000之间的整数
 - outfit六项都必须填写，符合角色年龄、职业和当前生活状态；不要写动作或心理，只写当前实际穿着
-- personaProfile必须忠实提取补充要求中的明确事实，不得遗漏、改写或用推测补充；每个数组0到6条，简短具体
-- speechSamples必须给4到8条，带简短场景标签，展示自然语气；不能写成旁白或解释
+- personaProfile必须忠实提取补充要求中的明确事实，不得遗漏、改写或用推测补充；每个数组0到4条，每条尽量简短
+- speechSamples给正好4条，带简短场景标签，展示自然语气；不能写成旁白或解释
 - mbti必须和persona里描述的性格一致 是这个人设最自然对应的MBTI类型
 - worldSchedule使用架空世界周循环，必须无重复地完整覆盖7个dayOfWeek × 4个slot，一共正好28条。dayOfWeek是世界连续日推导的0-6循环，不对应现实星期；slot只能是morning/day/evening/night；phoneAccess只能是available或unavailable；locationId只能来自完整地点树
 - 每条基础日程必须给出adherence：required表示角色通常不会自行偏离的硬安排，normal表示需要充分理由才会偏离，optional表示可自由调整的弱安排。不要因为角色懒散就把工作、课程或明确约定标成optional
+- 为避免JSON被截断，activity等字符串只写必要信息，不要在日程里写解释性长句
 - 只输出JSON 不要有markdown代码块标记`
 }
 

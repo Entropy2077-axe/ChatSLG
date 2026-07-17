@@ -18,8 +18,9 @@ import { randomAvatarColor } from './colors'
 import { employmentPatch } from './career'
 import { setPairedContactRelation } from './contactRelations'
 import { rememberInitialContactRelation } from './memory'
+import { archiveContactSnapshot } from './contactArchives'
 
-const PERSONA_TIMEOUT_MS = 120_000
+const PERSONA_TIMEOUT_MS = 150_000
 const AVATAR_TIMEOUT_MS = 15_000
 const queueRuntimeGlobal = globalThis as typeof globalThis & { __chatSlgContactQueueRuntime?: { workerRunning: boolean } }
 const queueRuntime = queueRuntimeGlobal.__chatSlgContactQueueRuntime ?? { workerRunning: false }
@@ -140,6 +141,7 @@ async function commitGeneratedContact(job: ContactCreationJob, draft: NonNullabl
       await rememberInitialContactRelation({ fromContactId: id, toContactId: row.targetContactId, label: row.label, now })
     }
   })
+  await archiveContactSnapshot(id, currentWorld, 'created')
   return id
 }
 
@@ -173,43 +175,66 @@ async function processJob(job: ContactCreationJob) {
       .map(([locationId, names]) => `- ${locationId}: ${[...names].join('、')}`)
       .join('\n')
     const locationTreeText = `${formatLocationTree(locations)}\n\n【现有住宅住户；未列出的独立公寓房间视为空置】\n${occupancyText || '当前尚无AI角色占用住宅。'}`
+    const parentIds = new Set(locations.map((item) => item.parentId).filter(Boolean))
+    const leafIds = new Set(locations.filter((item) => !parentIds.has(item.id)).map((item) => item.id))
     const worldbookText = await retrieveWorldbookContext([
       values.tags.join(' '), values.ageRange, values.gender, values.relationship,
       values.personalityTrait, values.hobbies.join(' '), values.occupation, input.extra,
     ].join('\n'), { maxEntries: 8, maxChars: 6500 })
-    const controller = new AbortController()
-    const raw = await withTimeout(chatCompletion({
-      apiKey: settings.apiKey,
-      baseUrl: settings.baseUrl,
-      model: settings.model,
-      messages: [
-        {
-          role: 'system',
-          content: buildPersonaGenerationPrompt({
-            personalityTags: values.tags,
-            ageRange: values.ageRange,
-            gender: values.gender,
-            relationship: values.relationship,
-            personalityTrait: values.personalityTrait,
-            hobbies: values.hobbies,
-            extra: [
-              input.extra,
-              input.mode === 'nuwa' ? `身份资料（留空项请自然补全）：真名=${input.realName || '未填写'}；网名=${input.nickname || '未填写'}；出生日期=${input.birthday || '未填写'}。` : '',
-              worldbookText ? `【创建时必须遵守的世界书】\n${worldbookText}` : '',
-            ].filter(Boolean).join('\n\n'),
-            occupation: values.occupation,
-          }, avatarCategory, locationTreeText),
-        },
-        { role: 'user', content: '请生成' },
-      ],
-      jsonMode: true,
-      purpose: 'persona',
-      signal: controller.signal,
-    }), controller)
-    const parsed = parsePersonaGeneration(raw)
-    if (!parsed) throw new Error('生成结果解析失败，请重试')
-    const parentIds = new Set(locations.map((item) => item.parentId).filter(Boolean))
-    const leafIds = new Set(locations.filter((item) => !parentIds.has(item.id)).map((item) => item.id))
+    const personaPrompt = buildPersonaGenerationPrompt({
+      personalityTags: values.tags,
+      ageRange: values.ageRange,
+      gender: values.gender,
+      relationship: values.relationship,
+      personalityTrait: values.personalityTrait,
+      hobbies: values.hobbies,
+      extra: [
+        input.extra,
+        input.mode === 'nuwa' ? `身份资料（留空项请自然补全）：真名=${input.realName || '未填写'}；网名=${input.nickname || '未填写'}；出生日期=${input.birthday || '未填写'}。` : '',
+        worldbookText ? `【创建时必须遵守的世界书】\n${worldbookText}` : '',
+      ].filter(Boolean).join('\n\n'),
+      occupation: values.occupation,
+    }, avatarCategory, locationTreeText)
+    let parsed: ReturnType<typeof parsePersonaGeneration> = null
+    let generationError: unknown
+    for (let attempt = 0; attempt < 2 && !parsed; attempt++) {
+      const controller = new AbortController()
+      try {
+        const retryNote = attempt === 0
+          ? '请生成。所有字符串保持简洁，但28条日程不可缺少。'
+          : '上一版被截断或未通过结构校验。请从头重写完整JSON：严格输出28条无重复日程，只用地点树叶子ID；不要解释。'
+        const raw = await withTimeout(chatCompletion({
+          apiKey: settings.apiKey,
+          baseUrl: settings.baseUrl,
+          model: settings.model,
+          messages: [
+            { role: 'system', content: personaPrompt },
+            { role: 'user', content: retryNote },
+          ],
+          jsonMode: true,
+          purpose: 'persona',
+          signal: controller.signal,
+          thinking: 'disabled',
+          temperature: attempt === 0 ? 0.65 : 0.35,
+          maxTokens: attempt === 0 ? 5600 : 6800,
+          timeoutMs: PERSONA_TIMEOUT_MS,
+        }), controller)
+        parsed = parsePersonaGeneration(raw)
+        if (!parsed) {
+          generationError = new Error('模型返回的角色JSON缺少字段、日程或使用了无效格式')
+        } else if (parsed.worldSchedule.some((item) => !leafIds.has(item.locationId))) {
+          parsed = null
+          generationError = new Error('模型日程引用了不存在或不可进入的地点')
+        }
+      } catch (error) {
+        generationError = error
+        const message = error instanceof Error ? error.message : String(error)
+        // HTTP/auth/configuration failures will not improve by spending a
+        // second request. Truncation/format failures often do.
+        if (!message.includes('输出上限') && !message.includes('格式') && !message.includes('解析')) throw error
+      }
+    }
+    if (!parsed) throw new Error(`角色生成连续两次未通过校验：${generationError instanceof Error ? generationError.message : '未知错误'}`)
     if (parsed.worldSchedule.length === 0) throw new Error('角色日程为空，请重新生成')
     if (parsed.worldSchedule.some((item) => !leafIds.has(item.locationId))) throw new Error('角色日程引用了不存在或不可进入的地点，请重试')
 

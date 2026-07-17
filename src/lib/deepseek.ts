@@ -21,7 +21,9 @@ const PURPOSE_DEFAULTS: Record<AiUsagePurpose, { maxTokens: number; temperature:
   moments: { maxTokens: 1400, temperature: 0.75, timeoutMs: 60_000 },
   worldbook: { maxTokens: 1600, temperature: 0.45, timeoutMs: 60_000 },
   lifeSimulation: { maxTokens: 900, temperature: 0.35, timeoutMs: 45_000 },
-  persona: { maxTokens: 2200, temperature: 0.85, timeoutMs: 90_000 },
+  // Persona JSON includes a complete 7×4 schedule. 2200 tokens truncated it
+  // routinely (especially with Nuwa's longer hard constraints).
+  persona: { maxTokens: 5600, temperature: 0.65, timeoutMs: 120_000 },
   quality: { maxTokens: 700, temperature: 0.1, timeoutMs: 45_000 },
   other: { maxTokens: 1600, temperature: 0.45, timeoutMs: 60_000 },
 }

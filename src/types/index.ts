@@ -584,6 +584,16 @@ export interface AppSettings {
   /** Feature-module toggles — see src/features/. Every module id listed here is active. */
   /** Last selected character-creation workflow. */
   contactCreatorMode?: 'standard' | 'nuwa'
+  /** Reusable, user-authored choices shown by the standard contact creator. */
+  contactCreatorCustomOptions?: ContactCreatorCustomOptions
+}
+
+export interface ContactCreatorCustomOptions {
+  personality: string[]
+  ages: string[]
+  genders: string[]
+  relationships: string[]
+  hobbies: string[]
 }
 
 export interface AdminLogRecord { id: string; level: 'log' | 'info' | 'warn' | 'error'; message: string; createdAt: number }
@@ -1097,6 +1107,24 @@ export interface SavedPersona {
   profile: ContactCreatorProfile
   personaConstraints?: string
   customPersonalityTraits?: CustomPersonalityTrait[]
+}
+
+/** A read-only point-in-time copy of a contact and its related state. */
+export interface ContactArchiveSnapshot {
+  id: string
+  contactId: string
+  worldVersion: number
+  worldStep: number
+  worldDay: number
+  worldSlot: TimeSlot
+  reason: 'created' | 'time_slice'
+  createdAt: number
+  snapshot: {
+    contact: Contact
+    schedules: CharacterSchedule[]
+    memories: ContactMemory[]
+    lifeState?: ContactLifeState
+  }
 }
 
 export interface ProactiveTopicRecord {
