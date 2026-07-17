@@ -84,6 +84,18 @@ describe('state adjudication parsing and deterministic validation', () => {
     ]))).toEqual([])
   })
 
+  it('keeps an immediate location acceptance grounded when later bubbles cover other state dimensions', () => {
+    const accepted = parsedDecision({
+      evidenceIds: ['a1', 'a2'],
+      location: { shouldChange: true, locationId: 'living', reason: '接受当前请求' },
+    })
+    expect(validateStateAdjudication(accepted.value!, context([
+      { id: 'u1', actorId: 'user', actorName: '用户', content: '走，去客厅吧', perceivedBy: ['alice'] },
+      { id: 'a1', actorId: 'alice', actorName: '林夏', content: '行啊，去客厅', perceivedBy: ['alice'] },
+      { id: 'a2', actorId: 'alice', actorName: '林夏', content: '明晚咖啡厅见，我会戴蝴蝶结', perceivedBy: ['alice'] },
+    ]))).toEqual([])
+  })
+
   it('anchors tomorrow evening and seven-day outfit constraints while preserving all three dimensions', () => {
     const valid = parsedDecision({
       outfit: { shouldChange: true, timing: 'future', patch: { accessories: '蝴蝶结' }, startDay: 4, endDay: 10, reason: '连续七天' },

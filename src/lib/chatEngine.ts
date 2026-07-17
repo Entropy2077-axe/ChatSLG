@@ -557,7 +557,11 @@ async function runAiTurn(
         ...(logicReview && !logicReview.valid ? [`客观逻辑错误：${logicReview.reason}`] : []),
         ...secondTurnCheck.issues,
       ]
-      if (secondIssues.length > 0) throw new Error(`主模型重写后仍未通过硬性验收：${secondIssues.join('；')}`)
+      if (secondIssues.length > 0) {
+        qualityCheckDebug.detectedInvalid = true
+        qualityCheckDebug.reason = `重写后仍未通过硬性验收：${secondIssues.join('；')}`
+        console.warn(`[chat] 有限重写后保留可解析回复，状态变化仍由独立裁决器拒绝不可靠证据 对方=${displayName(contact)} 原因=${qualityCheckDebug.reason}`)
+      }
     }
     if (imageRequestTask) {
       const parsedImage = bubbles.find((bubble): bubble is import('../types').AiBubbleImage => bubble.type === 'image')
@@ -603,7 +607,7 @@ async function runAiTurn(
         appointmentIds: logicBundle.subject.commitments.map((item) => item.id),
         memoryIds: logicBundle.memories.map((item) => item.id),
         perceivedEventIds: logicBundle.perceivedEvents.map((item) => item.eventId),
-        validation: qualityCheckDebug.detectedInvalid && !qualityCheckDebug.repaired ? 'rejected' : 'passed',
+        validation: qualityCheckDebug.detectedInvalid ? 'rejected' : 'passed',
         validationReason: qualityCheckDebug.reason,
       },
       createdAt: Date.now(),

@@ -220,14 +220,13 @@ function containsTentativeIntent(text: string, kind: 'outfit' | 'schedule' | 'lo
   return !explicitNow
 }
 
-function hasImmediateLocationCommitment(characterId: string, latestOwnText: string, evidence: StateEvidence[]): boolean {
-  if (/现在(?:就)?(?:去|走|出发)|这就(?:去|走|出发)|马上(?:去|走|出发)|已经(?:到|去|出发)|正在(?:去|走|前往)|走{2,}|(?:走|出发)(?:吧|了)|我(?:现在)?去(?:了|啦)/.test(latestOwnText)) return true
-  if (/稍后|等会|待会|一会儿|明天|明晚|今晚|以后|改天|回头|later|tomorrow|tonight/i.test(latestOwnText)) return false
+function hasImmediateLocationCommitment(characterId: string, ownTurnText: string, evidence: StateEvidence[]): boolean {
+  if (/现在(?:就)?(?:去|走|出发)|这就(?:去|走|出发)|马上(?:去|走|出发)|已经(?:到|去|出发)|正在(?:去|走|前往)|走{2,}|(?:走|出发)(?:吧|了)|我(?:现在)?去(?:了|啦)/.test(ownTurnText)) return true
   const userText = evidence.filter((event) => event.actorId === 'user' && event.perceivedBy.includes(characterId)).map((event) => event.content).join('\n')
   if (/有时候|有时|也许|可能|或许|想(?:去|走)|改天|回头|以后|明天|明晚|今晚|稍后|等会|待会|\b(?:maybe|perhaps|might|someday|tomorrow|later)\b/i.test(userText)) return false
   const currentRequest = /现在|这就|马上|走[,，！!]?|别.{0,12}(?:待|留).{0,8}(?:去|走)|(?:去|走).{0,12}(?:吧|呗)|\bgo now\b/i.test(userText)
-  const accepted = /(?:^|[，。！？,.!?\s])(?:好|行|可以|没问题|走吧|去吧|成)(?:$|[，。！？,.!?\s])|我(?:也)?(?:陪你)?去/.test(latestOwnText)
-  return currentRequest && accepted && !containsTentativeIntent(latestOwnText, 'location')
+  const accepted = /(?:^|[，。！？,.!?\s])(?:(?:好|行|可以|成)(?:啊|呀|的|吧)?|没问题|走吧|去吧)(?:$|[，。！？,.!?\s])|我(?:也)?(?:陪你)?去/.test(ownTurnText)
+  return currentRequest && accepted && !containsTentativeIntent(ownTurnText, 'location')
 }
 
 function imageOnlyOutfitEvidence(text: string): boolean {
@@ -293,6 +292,7 @@ export function validateStateAdjudication(value: ParsedStateAdjudication, contex
     const referenced = context.evidence.filter((event) => decision.evidenceIds.includes(event.id))
     const ownEvidence = referenced.filter((event) => event.actorId === decision.characterId)
     const latestOwnText = context.evidence.filter((event) => event.actorId === decision.characterId).at(-1)?.content ?? ''
+    const ownTurnText = context.evidence.filter((event) => event.actorId === decision.characterId).map((event) => event.content).join('\n')
     for (const kind of ['outfit', 'schedule', 'location'] as const) {
       if (!dimensionChanges(decision, kind)) continue
       const issue = (code: string, message: string) => issues.push({ code, message, characterId: decision.characterId, kind })
@@ -302,7 +302,7 @@ export function validateStateAdjudication(value: ParsedStateAdjudication, contex
       }
       if (containsExplicitRefusal(latestOwnText, kind)) issue('explicit_refusal', `${decision.characterId}.${kind}与角色最新明确拒绝相冲突`)
       if (containsTentativeIntent(latestOwnText, kind)) issue('tentative_intent', `${decision.characterId}.${kind}只有试探、愿望或建议，没有明确执行`)
-      if (kind === 'location' && !hasImmediateLocationCommitment(decision.characterId, latestOwnText, context.evidence)) {
+      if (kind === 'location' && !hasImmediateLocationCommitment(decision.characterId, ownTurnText, context.evidence)) {
         issue('location_not_immediate', `${decision.characterId}.location没有“现在执行”或对当前行动请求的明确承接`)
       }
       if (kind === 'outfit') {

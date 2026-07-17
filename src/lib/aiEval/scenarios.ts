@@ -326,6 +326,15 @@ export const AI_EVAL_SCENARIOS: AiEvalScenario[] = [
     { actor: 'user', content: '现在去客厅，从今天起连续七天戴蝴蝶结，明晚去咖啡厅。', perceivedBy: ['alice'] },
     { actor: 'alice', content: '好，现在去客厅；蝴蝶结也戴七天，明晚咖啡厅见。', perceivedBy: ['alice'] },
   ], { repetitions: 3 }),
+  state('multi-state-split-bubbles', 'multi_state', '立即移动的明确承接出现在前一条气泡时，后续衣着和日程气泡不得让地点提交漏判。', ['走，先去客厅；这礼拜都戴着蝴蝶结吧，明儿晚上咱们咖啡厅见。', '行啊，去客厅。', '蝴蝶结我会戴一周，明晚咖啡厅见。'], {
+    outfit: 'applied', outfitPatch: { accessories: '蝴蝶结' }, outfitStartDayOffset: 0, outfitEndDayOffset: 6,
+    schedule: 'applied', scheduleLocation: 'cafe', scheduleDayOffset: 1, scheduleSlots: ['evening'],
+    location: 'applied', locationTarget: 'livingRoom',
+  }, [
+    { actor: 'user', content: '走，先去客厅；这礼拜都戴着蝴蝶结吧，明儿晚上咱们咖啡厅见。', perceivedBy: ['alice'] },
+    { actor: 'alice', content: '行啊，去客厅。', perceivedBy: ['alice'] },
+    { actor: 'alice', content: '蝴蝶结我会戴一周，明晚咖啡厅见。', perceivedBy: ['alice'] },
+  ]),
 
   // Acceptance cases deliberately use colloquial wording and the complete
   // production chat path. They are not fed scripted assistant evidence.
